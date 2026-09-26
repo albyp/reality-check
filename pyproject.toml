@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reality-check"
+version = "0.1.0"
+description = "QA/QC for photogrammetry and LiDAR survey data"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "rasterio>=1.4",
+    "laspy[lazrs]>=2.5",
+    "pyproj>=3.6",
+    "pillow>=10",
+    "nicegui>=3",
+    "pywebview>=5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6"]
+
+[project.scripts]
+reality-check = "reality_check.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
