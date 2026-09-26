@@ -10,6 +10,7 @@ reload.
 from __future__ import annotations
 
 import queue
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,7 +33,7 @@ from reality_check.review import (
     set_manual_xy,
     set_not_found,
 )
-from reality_check.session import SESSION_SUFFIX, Session, Settings
+from reality_check.session import SESSION_SUFFIX, Session, Settings, output_name
 
 CHIP_SIZES = [0.5, 1.0, 2.0, 5.0, 10.0]  # m
 CHIP_PX = 400
@@ -61,6 +62,7 @@ class State:
     dirty: bool = False
     busy: bool = False
     desktop: bool = False  # running in the pywebview window (drag and drop gives full paths)
+    window: object | None = None  # the pywebview window, for native file dialogs
 
 
 S = State()
@@ -80,8 +82,11 @@ window.addEventListener('drop', e => { e.preventDefault(); if (!window.pywebview
 
 
 # ---------- native file dialogs (the server runs on the user's own PC) ----------
+#
+# In the desktop window, use pywebview's dialogs: they belong to the app window,
+# so they always open on top of it. In browser mode, fall back to tkinter.
 
-def _tk_dialog(kind: str, title: str, types, initial: str = "") -> str:
+def _tk_dialog(kind: str, title: str, types, initial: str = "", directory: str = "") -> str:
     import tkinter as tk
     from tkinter import filedialog
 
@@ -90,19 +95,54 @@ def _tk_dialog(kind: str, title: str, types, initial: str = "") -> str:
     root.attributes("-topmost", True)
     try:
         if kind == "open":
-            return filedialog.askopenfilename(parent=root, title=title, filetypes=types)
+            return filedialog.askopenfilename(parent=root, title=title, filetypes=types, initialdir=directory or None)
         return filedialog.asksaveasfilename(parent=root, title=title, filetypes=types, initialfile=initial,
+                                            initialdir=directory or None,
                                             defaultextension=types[0][1].split()[0].lstrip("*"))
     finally:
         root.destroy()
 
 
-async def ask_open(title: str, types) -> str:
-    return await run.io_bound(_tk_dialog, "open", title, types)
+def _webview_types(types) -> tuple[str, ...]:
+    """tkinter-style [("PDF", "*.pdf")] to pywebview-style ("PDF (*.pdf)",)."""
+    return tuple(f"{label} ({';'.join(pattern.split())})" for label, pattern in types)
 
 
-async def ask_save(title: str, types, initial: str) -> str:
-    return await run.io_bound(_tk_dialog, "save", title, types, initial)
+def _webview_dialog(kind: str, types, initial: str = "", directory: str = "") -> str:
+    import webview
+
+    dialog = webview.FileDialog.OPEN if kind == "open" else webview.FileDialog.SAVE
+    result = S.window.create_file_dialog(dialog, directory=directory, save_filename=initial,
+                                         file_types=_webview_types(types))
+    if not result:
+        return ""
+    path = result if isinstance(result, str) else result[0]
+    if kind == "save":  # the Windows save dialog does not always add the extension
+        ext = types[0][1].split()[0].lstrip("*")
+        if ext.startswith(".") and not path.lower().endswith(ext.lower()):
+            path += ext
+    return path
+
+
+async def _dialog(kind: str, title: str, types, initial: str = "", directory: str = "") -> str:
+    if S.window is not None:
+        return await run.io_bound(_webview_dialog, kind, types, initial, directory)
+    return await run.io_bound(_tk_dialog, kind, title, types, initial, directory)
+
+
+async def ask_open(title: str, types, directory: str = "") -> str:
+    return await _dialog("open", title, types, directory=directory)
+
+
+async def ask_save(title: str, types, initial: str, directory: str = "") -> str:
+    return await _dialog("save", title, types, initial, directory)
+
+
+def _project_dir() -> str:
+    """Default folder for saving: the control file's folder."""
+    ctrl = S.inputs.get("control") or (S.session.control_path if S.session else "")
+    folder = Path(ctrl).parent if ctrl else None
+    return str(folder) if folder and folder.is_dir() else ""
 
 
 # ---------- helpers ----------
@@ -188,8 +228,8 @@ def index() -> None:
             return
         path = S.session_path
         if path is None:
-            chosen = await ask_save("Save session", FILE_TYPES["session"],
-                                    Path(S.session.control_path).stem + SESSION_SUFFIX)
+            chosen = await ask_save("Save session", FILE_TYPES["session"], output_name(S.session, "session"),
+                                    _project_dir())
             if not chosen:
                 return
             path = Path(chosen)
@@ -249,6 +289,16 @@ def setup_panel(panels, t_review) -> None:
             ui.label("Inputs").classes("text-subtitle1 text-weight-medium")
             ui.label("All datasets are assumed to share the control points' coordinate system.").classes(
                 "text-caption text-grey-7")
+            def set_title(e):
+                S.settings.project_title = (e.value or "").strip()
+                if S.session:
+                    S.session.settings = S.settings
+                    _mark_dirty()
+
+            ui.input("Project title", value=S.settings.project_title,
+                     placeholder="Defaults to the control file name",
+                     on_change=set_title).classes("w-full").props("dense").tooltip(
+                "Used in the report heading and in export names, e.g. <title>_RealityCheck.pdf")
             drop_zone()
             for key, label in INPUT_LABELS.items():
                 file_row(key, label)
@@ -341,7 +391,7 @@ def file_row(key: str, label: str) -> None:
         inp.on_value_change(lambda e: S.inputs.__setitem__(key, (e.value or "").strip().strip('"')))
 
         async def browse():
-            path = await ask_open(label, FILE_TYPES[key])
+            path = await ask_open(label, FILE_TYPES[key], _project_dir())
             if path:
                 inp.set_value(path)
 
@@ -628,19 +678,25 @@ def report_panel() -> None:
     ui.timer(0.1, refresh, once=True)
 
     async def export(kind: str):
-        stem = Path(S.session.control_path).stem
         types = {"pdf": [("PDF", "*.pdf")], "html": [("HTML", "*.html")], "residuals": [("CSV", "*.csv")],
                  "summary": [("CSV", "*.csv")]}[kind]
-        initial = {"pdf": f"{stem}_report.pdf", "html": f"{stem}_report.html", "residuals": f"{stem}_residuals.csv",
-                   "summary": f"{stem}_summary.csv"}[kind]
-        path = await ask_save(f"Export {kind}", types, initial)
+        try:
+            path = await ask_save(f"Export {kind}", types, output_name(S.session, kind), _project_dir())
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            ui.notify(f"Could not open the save dialog: {e}", type="negative", multi_line=True)
+            return
         if not path:
             return
         n = ui.notification(f"Exporting {Path(path).name}…", spinner=True, timeout=None)
         try:
             await run.io_bound(_export, kind, Path(path))
-            ui.notify(f"Saved {path}", type="positive")
+            ui.notify(f"Saved {path}", type="positive", multi_line=True)
+        except PermissionError:
+            ui.notify(f"Could not write {Path(path).name}. Is it open in another program (Excel, a PDF viewer)?",
+                      type="negative", multi_line=True)
         except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
             ui.notify(f"Export failed: {e}", type="negative", multi_line=True)
         finally:
             n.dismiss()
