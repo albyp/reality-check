@@ -122,7 +122,14 @@ def detect(paths: list[str | Path]) -> Detection:
     return det
 
 
+def is_own_output(p: Path) -> bool:
+    """RealityCheck's own exports (<title>_RealityCheck*.csv etc.) are never inputs."""
+    return "_realitycheck" in p.name.lower()
+
+
 def _classify_quiet(p: Path) -> str | None:
+    if is_own_output(p):
+        return None
     try:
         return classify_file(p)
     except OSError:
