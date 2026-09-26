@@ -23,9 +23,12 @@ All notable changes to RealityCheck. Format based on
   report uses no ink there.
 
 ### Fixed
-- PDF export from the desktop window: Edge now gets an empty stdin, and a
-  locked temporary folder left by Edge after printing no longer turns a
-  written PDF into an error.
+- PDF export from the desktop window. Inside the GUI process, Edge's
+  launcher could exit (code 0) before its helper had written the PDF, or its
+  helpers could run on long after the PDF was done, so the export failed or
+  hung. Edge now runs detached, the export waits for a complete PDF (ending
+  in `%%EOF`, size stable), then closes that print job's Edge processes and
+  moves the file into place.
 - Errors in the packaged exe are written to
   `%LOCALAPPDATA%\RealityCheck\realitycheck.log` through a dedicated log
   handler; the red error box names the error type.
