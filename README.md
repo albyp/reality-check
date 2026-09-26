@@ -52,7 +52,11 @@ your own PC. `reality-check gui --browser` opens it in a browser tab instead.
    zoom. Click the target centre on the orthomosaic or point cloud to set the
    measured position. *Not found*, *Reset*, *Enabled*, *Needs touch-up*,
    role and note are per point.
-3. **Report**: preview the report and export PDF, HTML or CSV.
+3. **Report**: preview the report and export PDF, HTML or CSV. The report
+   includes a site overview: the orthomosaic with every control point, its
+   horizontal error as an exaggerated ellipse and its dZ as a colour. Exports
+   are named after the project title (set on the Setup tab), for example
+   `BZ Pit 24 Sept_RealityCheck.pdf`.
 4. **Save session** keeps all review work in a `.rcheck.json` file.
 
 ### Reading the numbers
@@ -75,8 +79,9 @@ reality-check classes cloud.laz
 reality-check crs list
 ```
 
-`run` writes `report.html` and `session.rcheck.json` (open it in the GUI to
-review). Options: `--pdf`, `--csv`, `--radius` (cloud Z search radius,
+`run` writes `<title>_RealityCheck.html` and `<title>_RealityCheck.rcheck.json`
+(open it in the GUI to review). The title defaults to the control file name.
+Options: `--title`, `--pdf`, `--csv`, `--radius` (cloud Z search radius,
 default 0.5 m), `--classes 2,11`, `--tol-z`, `--tol-xy`, `--chip-size`,
 `--control-crs NAME` (control points in a local grid from the CRS library).
 
