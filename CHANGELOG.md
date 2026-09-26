@@ -5,6 +5,24 @@ All notable changes to RealityCheck. Format based on
 
 ## [Unreleased]
 
+### Added
+- Project title in Setup (and `--title` on the command line). Used in the
+  report heading and in export names: `<title>_RealityCheck.pdf`, `.html`,
+  `_residuals.csv`, `_summary.csv` and `.rcheck.json`. Defaults to the control
+  file name.
+- Site overview in the report: the orthomosaic (or DEM hillshade) with every
+  control point plotted. Horizontal error is drawn as an exaggerated ellipse
+  (semi-axes dX, dY) with a direction line, dZ as the fill colour, and a
+  legend with ground scale, exaggeration factor and dZ colour bar.
+- Save and open dialogs start in the control file's folder.
+
+### Fixed
+- Exports from the desktop window use the window's own file dialog. The
+  previous dialog could open behind the app or fail to appear, so exports
+  looked like they did nothing.
+- Export errors are written to the log, and a file locked by another program
+  (Excel, a PDF viewer) gets a clear message.
+
 ## [0.1.0] - 2026-09-26
 
 First public release.
