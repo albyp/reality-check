@@ -30,6 +30,17 @@ def test_role_column(tmp_path):
     assert [c.role for c in load_control(p)] == [Role.GCP, Role.CHECKPOINT, Role.UNKNOWN]
 
 
+def test_metashape_enable_column(tmp_path):
+    # Metashape marker export: Enable 1 = used as control (GCP), 0 = check point.
+    p = tmp_path / "a.csv"
+    p.write_text("#Label,Enable,X/Easting,Y/Northing,Z/Altitude\n"
+                 "924-01,1,514521.45,6681455.436,220.1\n606-08,0,514758.118,6681935.242,265.708\n")
+    a, b = load_control(p)
+    assert (a.role, b.role) == (Role.GCP, Role.CHECKPOINT)
+    assert (b.x, b.y, b.z) == (514758.118, 6681935.242, 265.708)  # columns after Enable still line up
+    assert a.enabled and b.enabled
+
+
 def test_duplicate_ids_rejected(tmp_path):
     p = tmp_path / "a.csv"
     p.write_text("A,1,2,3\nA,4,5,6\n")
