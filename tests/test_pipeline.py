@@ -17,20 +17,23 @@ SAMPLE = Path(__file__).resolve().parents[1] / "sample_data"
 def test_cli_run_end_to_end(tmp_path, control_path, ortho_path, dem_path, las_path):
     out = tmp_path / "out"
     rc = main(["run", "--control", control_path, "--ortho", ortho_path, "--dem", dem_path,
-               "--cloud", las_path, "--out", str(out), "--classes", "2,5", "--tol-z", "0.03", "--csv"])
+               "--cloud", las_path, "--out", str(out), "--classes", "2,5", "--tol-z", "0.03", "--csv",
+               "--title", "Test Pit"])
     assert rc == 0
-    assert sorted(p.name for p in out.iterdir()) == ["report.html", "residuals.csv", "session.rcheck.json",
-                                                      "summary.csv"]
-    rows = list(csv.DictReader(open(out / "residuals.csv")))
+    assert sorted(p.name for p in out.iterdir()) == [
+        "Test Pit_RealityCheck.html", "Test Pit_RealityCheck.rcheck.json",
+        "Test Pit_RealityCheck_residuals.csv", "Test Pit_RealityCheck_summary.csv"]
+    rows = list(csv.DictReader(open(out / "Test Pit_RealityCheck_residuals.csv")))
     dem_rows = {r["point_id"]: r for r in rows if r["dataset_id"] == "dem:dem"}
     assert float(dem_rows["A"]["dz"]) == pytest.approx(-0.05, abs=1e-3)
     assert dem_rows["OUT"]["status"] == "out_of_extent"
 
-    html = (out / "report.html").read_text(encoding="utf-8")
-    assert "RealityCheck QA/QC report" in html and html.count("<figure>") == 4 * 3
+    html = (out / "Test Pit_RealityCheck.html").read_text(encoding="utf-8")
+    assert "RealityCheck QA/QC report" in html and "Test Pit" in html
+    assert html.count("<figure>") == 4 * 3 and "Site overview" in html
     assert "exceeds tolerance" in html  # 5 cm residuals vs 3 cm tolerance
 
-    s = Session.load(out / "session.rcheck.json")
+    s = Session.load(out / "Test Pit_RealityCheck.rcheck.json")
     assert len(s.points) == 4 and s.settings.cloud_classes == [2, 5] and s.settings.tol_z == 0.03
 
 
@@ -103,7 +106,7 @@ def test_pdf_export(tmp_path, control_path, ortho_path, las_path):
 def test_session_round_trip_keeps_review_state(tmp_path, control_path, dem_path):
     out = tmp_path / "out"
     main(["run", "--control", control_path, "--dem", dem_path, "--out", str(out)])
-    path = out / "session.rcheck.json"
+    path = out / "gcp_RealityCheck.rcheck.json"  # no --title: named after the control file
     s = Session.load(path)
     s.point("A").enabled = False
     s.point("B").needs_touch_up = True
@@ -122,7 +125,37 @@ def test_sample_dataset_z_accuracy(tmp_path):
                "--dem", str(SAMPLE / "260924_bz_pit_dem.tif"), "--cloud", str(SAMPLE / "260924_bz_pit.laz"),
                "--out", str(out), "--csv"])
     assert rc == 0
-    rows = list(csv.DictReader(open(out / "summary.csv")))
+    rows = list(csv.DictReader(open(out / "260924_bz_pit_gcp_export_RealityCheck_summary.csv")))
     rmse = {r["dataset_id"]: float(r["rmse"]) for r in rows if r["group"] == "all"}
     assert rmse["dem:260924_bz_pit_dem"] < 0.05
     assert rmse["cloud:260924_bz_pit"] < 0.05
+
+
+def test_output_names_and_title(control_path, dem_path):
+    from reality_check.session import output_name, project_title, safe_filename
+
+    s = run(control_path, make_datasets([], [dem_path], []), progress=lambda m: None).session
+    assert project_title(s) == "gcp" and output_name(s, "pdf") == "gcp_RealityCheck.pdf"
+    s.settings.project_title = "Pit 3: Sept/Oct"
+    assert output_name(s, "residuals") == "Pit 3_ Sept_Oct_RealityCheck_residuals.csv"
+    assert safe_filename("  ..  ") == "project"
+
+
+def test_overview_marks_every_point(control_path, ortho_path, las_path):
+    from reality_check.overview import render_overview
+
+    res = _run(control_path, ortho_path, las_path)
+    s = res.session
+    set_manual_xy(s, "A", "ortho:ortho", s.point("A").x + 0.03, s.point("A").y - 0.02)
+    set_not_found(s, "B", "ortho:ortho")
+    s.point("C").enabled = False
+    img = render_overview(s, width=800)
+    assert img.width == 800
+    assert img.getpixel((img.width - 2, img.height - 2)) == (255, 255, 255)  # legend strip below the map
+
+
+def test_webview_file_types():
+    from reality_check.gui import _webview_types
+
+    assert _webview_types([("Point cloud", "*.las *.laz"), ("All files", "*.*")]) == (
+        "Point cloud (*.las;*.laz)", "All files (*.*)")
