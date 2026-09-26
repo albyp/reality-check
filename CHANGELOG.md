@@ -15,8 +15,20 @@ All notable changes to RealityCheck. Format based on
   (semi-axes dX, dY) with a direction line, dZ as the fill colour, and a
   legend with ground scale, exaggeration factor and dZ colour bar.
 - Save and open dialogs start in the control file's folder.
+- Metashape's `Enable` column in a marker export sets each point's role:
+  `1` = GCP (used as control), `0` = checkpoint.
+
+### Changed
+- The site overview has a white background outside the imagery, so a printed
+  report uses no ink there.
 
 ### Fixed
+- PDF export from the desktop window: Edge now gets an empty stdin, and a
+  locked temporary folder left by Edge after printing no longer turns a
+  written PDF into an error.
+- Errors in the packaged exe are written to
+  `%LOCALAPPDATA%\RealityCheck\realitycheck.log` through a dedicated log
+  handler; the red error box names the error type.
 - Exports from the desktop window use the window's own file dialog. The
   previous dialog could open behind the app or fail to appear, so exports
   looked like they did nothing.
