@@ -67,9 +67,10 @@ your own PC. `reality-check gui --browser` opens it in a browser tab instead.
   mix-up shows up as a large bias).
 - **RMSE** combines bias and scatter: RMSE² ≈ bias² + SD².
 - **GCPs** were used in processing, so their residuals are near zero by
-  design. Only **checkpoints** give an independent accuracy figure. Add a
-  `used` column to the control CSV (`yes` = GCP, `no` = checkpoint) or set
-  the role per point in the GUI.
+  design. Only **checkpoints** give an independent accuracy figure. A
+  Metashape marker export already carries this as its `Enable` column
+  (`1` = used as control, `0` = check point). Otherwise add a `used` column
+  (`yes` = GCP, `no` = checkpoint), or set the role per point in the GUI.
 
 ## Command line
 
