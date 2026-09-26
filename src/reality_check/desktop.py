@@ -40,7 +40,7 @@ def run_desktop() -> None:
     from nicegui import ui
     from webview.dom import DOMEventHandler
 
-    from reality_check import gui  # noqa: F401  (registers the page)
+    from reality_check import gui  # registers the page
 
     port = free_port()
     fastapi_app = FastAPI()
@@ -52,6 +52,7 @@ def run_desktop() -> None:
 
     window = webview.create_window("RealityCheck", f"http://127.0.0.1:{port}/", width=1500, height=950,
                                    min_size=(1000, 650))
+    gui.S.window = window  # native file dialogs open on top of this window
 
     def on_drop(event) -> None:
         files = event.get("dataTransfer", {}).get("files", [])
