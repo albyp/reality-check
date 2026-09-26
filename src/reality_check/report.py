@@ -320,14 +320,18 @@ def write_pdf(session: Session, renderer: ChipRenderer, path: Path, warnings: li
         raise RuntimeError("PDF export needs Microsoft Edge or Google Chrome. Export HTML and print it instead.")
     path = Path(path).resolve()
     path.unlink(missing_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
+    # Edge's helper processes can keep the temporary profile locked for a moment
+    # after printing; a failed clean-up must not turn a written PDF into an error.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src = Path(tmp) / "report.html"
         write_html(session, renderer, src, warnings)
         profile = Path(tmp) / "profile"  # isolated profile so a running Edge window is not reused
         cmd = [browser, "--headless=new", "--disable-gpu", "--no-pdf-header-footer", f"--user-data-dir={profile}",
                f"--print-to-pdf={path}", src.as_uri()]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180,
+        # stdin=DEVNULL: a windowed exe has no valid stdin handle to pass on.
+        proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180,
                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if not path.exists():
-            raise RuntimeError(f"PDF export failed: {proc.stderr.strip() or proc.stdout.strip()}")
+            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}"
+            raise RuntimeError(f"PDF export failed: {detail}")
     return path
