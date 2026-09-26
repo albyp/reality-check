@@ -16,13 +16,14 @@ from PIL import Image, ImageDraw
 from rasterio.enums import Resampling
 from rasterio.windows import from_bounds
 
-from reality_check.chips import BACKGROUND, _font, _nice_length, hillshade
+from reality_check.chips import _font, _nice_length, hillshade
 from reality_check.models import CheckKind, DatasetKind, ObsStatus
 from reality_check.review import point_results
 from reality_check.session import Session
 
 MARGIN = 0.04  # fraction of the extent added around the control points
 TARGET_ELLIPSE = 0.035  # largest ellipse semi-axis, as a fraction of image width
+PAPER = (255, 255, 255)  # outside the imagery: white, so a printed report uses no ink there
 DZ_NEG = np.array([33, 102, 172], float)  # surface below surveyed
 DZ_MID = np.array([247, 247, 247], float)
 DZ_POS = np.array([178, 24, 43], float)  # surface above surveyed
@@ -65,10 +66,10 @@ def _background(session: Session, bounds, width: int, height: int) -> tuple[Imag
                 rgb = np.ma.filled(data, 0).astype(np.uint8)
                 rgb = np.repeat(rgb, 3, axis=0) if rgb.shape[0] == 1 else rgb
                 rgb = np.moveaxis(rgb, 0, -1).copy()
-                rgb[mask] = BACKGROUND
+                rgb[mask] = PAPER
                 # Soften the ortho so the symbols stand out.
                 rgb = (rgb.astype(float) * 0.8 + 255 * 0.2).astype(np.uint8)
-                rgb[mask] = BACKGROUND
+                rgb[mask] = PAPER
                 return Image.fromarray(rgb), "Orthomosaic"
             z = r.read(1, window=win, out_shape=(height, width), boundless=True, masked=True).astype(float)
             mask = np.ma.getmaskarray(z)
@@ -78,16 +79,16 @@ def _background(session: Session, bounds, width: int, height: int) -> tuple[Imag
             zf = np.where(mask, np.nanmedian(zf), zf)
             shade = hillshade(zf, (right - left) / width)
             g = (70 + 170 * shade).astype(np.uint8)
-            g[mask] = BACKGROUND[0]
+            g[mask] = PAPER[0]
             return Image.fromarray(np.stack([g, g, g], axis=-1)), "DEM hillshade"
-    return Image.new("RGB", (width, height), (235, 235, 235)), "No imagery"
+    return Image.new("RGB", (width, height), PAPER), "No imagery"
 
 
 def render_overview(session: Session, width: int = 1600) -> Image.Image:
     results = point_results(session)
     pts = session.points
     if not pts:
-        return Image.new("RGB", (width, width // 2), (235, 235, 235))
+        return Image.new("RGB", (width, width // 2), PAPER)
 
     xs, ys = np.array([p.x for p in pts]), np.array([p.y for p in pts])
     span = max(xs.max() - xs.min(), ys.max() - ys.min(), 10.0)
