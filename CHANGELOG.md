@@ -5,6 +5,28 @@ All notable changes to RealityCheck. Format based on
 
 ## [Unreleased]
 
+### Added
+- Project templates: for each input, a folder relative to the project
+  folder plus file patterns and exclusions. Built in: *Project root*
+  (default), *Exports folder* and a draft *Pix4D* layout. In Setup, choose a
+  template and drop or load a project folder; files the template cannot find
+  open a dialog to choose them or continue without them (orthomosaic and DEM
+  are optional; control points and one dataset are required).
+- `settings.json` next to the exe (or `%APPDATA%\RealityCheck` if that folder
+  is read-only) with default tolerances, cloud radius, report chip width,
+  the default template and all templates. Created on first run.
+- Settings tab: edit defaults; add, edit, duplicate, delete and test
+  templates on a folder; restore the built-in templates.
+- Batch tab: run many project folders with one template. Drag folders in,
+  see what each project resolved to, choose PDF/HTML/CSV and an optional
+  single output folder, and get a results table with each report and a link
+  to open the session in Review.
+- Command line: `batch` and `templates`.
+
+### Fixed
+- RealityCheck's own exports (`*_RealityCheck*`) are never picked up as
+  inputs when a folder is scanned.
+
 ## [0.2.0] - 2026-09-26
 
 ### Added
