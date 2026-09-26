@@ -14,6 +14,17 @@ targets for a touch-up, and export the report.
 > Status: early development. Z checks, the review GUI, manual XY picks and
 > the report work. Automatic target detection is next.
 
+## Download (Windows)
+
+1. Download `RealityCheck-<version>-win64.zip` from the
+   [Releases](https://github.com/albyp/reality-check/releases) page.
+2. Extract the zip. Running the exe from inside the zip does not work: the
+   `_internal` folder must stay next to `RealityCheck.exe`.
+3. Double-click `RealityCheck.exe`.
+
+The exe is not code-signed yet, so Windows SmartScreen may show "Windows
+protected your PC". Click *More info*, then *Run anyway*.
+
 ## Inputs
 
 | Input | Formats |
@@ -116,3 +127,16 @@ Done items are listed in [CHANGELOG.md](CHANGELOG.md).
       checks that do not depend on RGB alignment.
 - [ ] Datum transforms for control points (GDA94 ↔ GDA2020).
 - [ ] Batch QA of several surveys and trends across surveys.
+
+## License
+
+Copyright (C) 2026 Alby Palmer.
+
+RealityCheck is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License version 3, as published by the
+Free Software Foundation. It is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE).
+
+Bundled third-party components and their licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
