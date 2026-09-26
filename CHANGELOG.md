@@ -5,7 +5,13 @@ All notable changes to RealityCheck. Format based on
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-26
+
+First public release.
+
 ### Added
+- Licensed under GPL-3.0. Third-party components are listed in
+  THIRD_PARTY_NOTICES.md; both files ship in the release zip.
 - Control point loader for CSV/TXT. Recognises common survey headers
   (`Label`, `X/Easting`, `Z/Altitude`, ...), a leading `#` on the header,
   files without a header, whitespace-separated files, and an optional
