@@ -21,6 +21,9 @@ All notable changes to RealityCheck. Format based on
 ### Changed
 - The site overview has a white background outside the imagery, so a printed
   report uses no ink there.
+- Printed reports keep each heading with its content. A table longer than a
+  page prints in page-sized parts, each with its heading ("(continued…)"
+  after the first) and header row; on screen it stays one table.
 
 ### Fixed
 - PDF export from the desktop window. Inside the GUI process, Edge's
