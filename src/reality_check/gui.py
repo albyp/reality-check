@@ -9,8 +9,8 @@ reload.
 
 from __future__ import annotations
 
+import logging
 import queue
-import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,6 +66,7 @@ class State:
 
 
 S = State()
+log = logging.getLogger("reality_check")
 LOG: queue.Queue[str] = queue.Queue()
 INPUT_FIELDS: dict[str, ui.input] = {}  # role -> input element on the current page
 INPUT_LABELS = {"control": "Control points (CSV)", "ortho": "Orthomosaic (GeoTIFF)", "dem": "DEM (GeoTIFF)",
@@ -683,21 +684,23 @@ def report_panel() -> None:
         try:
             path = await ask_save(f"Export {kind}", types, output_name(S.session, kind), _project_dir())
         except Exception as e:  # noqa: BLE001
-            traceback.print_exc()
-            ui.notify(f"Could not open the save dialog: {e}", type="negative", multi_line=True)
+            log.exception("Save dialog failed")
+            ui.notify(f"Could not open the save dialog: {type(e).__name__}: {e}", type="negative", multi_line=True)
             return
         if not path:
             return
         n = ui.notification(f"Exporting {Path(path).name}…", spinner=True, timeout=None)
         try:
             await run.io_bound(_export, kind, Path(path))
+            log.info("Exported %s to %s", kind, path)
             ui.notify(f"Saved {path}", type="positive", multi_line=True)
-        except PermissionError:
-            ui.notify(f"Could not write {Path(path).name}. Is it open in another program (Excel, a PDF viewer)?",
+        except PermissionError as e:
+            log.exception("Export %s to %s failed", kind, path)
+            ui.notify(f"Could not write {Path(path).name}: {e}. Is it open in another program (Excel, a PDF viewer)?",
                       type="negative", multi_line=True)
         except Exception as e:  # noqa: BLE001
-            traceback.print_exc()
-            ui.notify(f"Export failed: {e}", type="negative", multi_line=True)
+            log.exception("Export %s to %s failed", kind, path)
+            ui.notify(f"Export failed: {type(e).__name__}: {e}", type="negative", multi_line=True)
         finally:
             n.dismiss()
 
