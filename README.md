@@ -43,11 +43,14 @@ Double-click `RealityCheck.exe` (keep the `_internal` folder next to it), or
 run `reality-check gui`. The app opens in its own window and runs only on
 your own PC. `reality-check gui --browser` opens it in a browser tab instead.
 
-1. **Setup**: drag the files, or the whole project folder, onto the window.
-   Files are matched automatically (`*_dem.tif` → DEM, other `.tif` →
-   orthomosaic, `.las/.laz` → point cloud, `.csv` → control points). The
-   Browse buttons still work. Set tolerances, then *Run checks*. Dropping a
-   `.rcheck.json` session file opens it.
+1. **Setup**: choose a template and drag the project folder onto the window
+   (or pick it with the folder button and *Load*). The template says where the
+   files are; anything it cannot find opens a dialog to choose the file or
+   continue without it (the orthomosaic and DEM are optional). With
+   *Auto-detect*, dropped files and folders are matched by name (`*_dem.tif` →
+   DEM, other `.tif` → orthomosaic, `.las/.laz` → point cloud, `.csv` →
+   control points). The Browse buttons still work. Set tolerances, then
+   *Run checks*. Dropping a `.rcheck.json` session file opens it.
 2. **Review**: click a point (or press N / P). Use the chip width slider to
    zoom. Click the target centre on the orthomosaic or point cloud to set the
    measured position. *Not found*, *Reset*, *Enabled*, *Needs touch-up*,
@@ -58,6 +61,35 @@ your own PC. `reality-check gui --browser` opens it in a browser tab instead.
    are named after the project title (set on the Setup tab), for example
    `BZ Pit 24 Sept_RealityCheck.pdf`.
 4. **Save session** keeps all review work in a `.rcheck.json` file.
+
+### Templates
+
+A template describes a site's folder layout: for control points,
+orthomosaic, DEM and point cloud, a folder relative to the project folder
+(blank = the project folder itself), file patterns and exclusions. Built in:
+
+| Template | Layout |
+|---|---|
+| Project root (default) | Everything directly inside the project folder |
+| Exports folder | Control CSV in the project folder; `exports/` holds `name.tif`, `name_dem.tif`, `name.laz` |
+| Pix4D (draft) | Pix4Dmapper output folders. **Draft: confirm the paths before relying on it.** |
+
+Add, edit, duplicate and test templates on the **Settings** tab (*Test on a
+folder* shows what a template would pick). Templates and default settings
+live in `settings.json` next to `RealityCheck.exe`, created on first run. If
+that folder cannot be written to (for example under Program Files),
+`%APPDATA%\RealityCheck\settings.json` is used; the Settings tab shows which.
+
+### Batch
+
+The **Batch** tab runs many projects with one template: drag project folders
+onto it (or *Add folder*), check what each one resolved to, choose PDF, HTML
+and/or CSV output, and *Run batch*. Each project uses the Setup tab's
+tolerances and cloud settings, and its folder name as the report title.
+Outputs go inside each project folder, or into one output folder if set. A
+missing orthomosaic or DEM is noted, not an error; a project without control
+points is skipped. The results table opens each report, or the session in
+Review for manual adjustments.
 
 ### Reading the numbers
 
@@ -76,9 +108,16 @@ your own PC. `reality-check gui --browser` opens it in a browser tab instead.
 
 ```
 reality-check run --control gcp.csv --ortho ortho.tif --dem dem.tif --cloud cloud.laz --out results --tol-z 0.05 --pdf
+reality-check batch --template "Exports folder" D:/Surveys/pit_a D:/Surveys/pit_b --pdf --csv
+reality-check templates
 reality-check classes cloud.laz
 reality-check crs list
 ```
+
+`batch` runs each project folder with a template from `settings.json`
+(default: the default template); tolerances default to `settings.json` too
+(`--tol-z`, `--tol-xy` override). `--out DIR` puts all outputs in one folder.
+`templates` lists the templates and where `settings.json` is.
 
 `run` writes `<title>_RealityCheck.html` and `<title>_RealityCheck.rcheck.json`
 (open it in the GUI to review). The title defaults to the control file name.
@@ -115,9 +154,8 @@ older copies, which would otherwise break every CRS lookup.
 Done items are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ### Next
-- [ ] Site templates: save a folder layout per site (for example
-      `project/exports/[name.tif, name.laz, name_dem.tif]`) so dropping a
-      project folder maps files by the site's rule, not the built-in guess.
+- [ ] Pix4D template: confirm the Pix4Dmapper (and Pix4Dmatic) output paths
+      and update the draft built-in template.
 - [ ] Automatic target-centre detection for painted X crosses on ortho and
       point cloud chips, with a confidence score; low confidence → "not found".
 - [ ] Hide/mark GCPs vs checkpoints in the summary cards once roles are set.
@@ -132,7 +170,9 @@ Done items are listed in [CHANGELOG.md](CHANGELOG.md).
 - [ ] Check grids: flat-ground point grids (for example 5 x 5) for lidar Z
       checks that do not depend on RGB alignment.
 - [ ] Datum transforms for control points (GDA94 ↔ GDA2020).
-- [ ] Batch QA of several surveys and trends across surveys.
+- [ ] 3D models (OBJ and similar) as a dataset: Z check against the mesh
+      surface, chips from the textured mesh, template support.
+- [ ] Trends across surveys: compare batch results over time for one site.
 
 ## License
 
