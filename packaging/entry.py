@@ -7,6 +7,7 @@ attaches to that terminal so command line output is visible.
 """
 
 import ctypes
+import logging
 import os
 import sys
 import traceback
@@ -29,6 +30,15 @@ def _log_to_file() -> Path:
     path = LOG_DIR / "realitycheck.log"
     stream = open(path, "a", encoding="utf-8", buffering=1)
     sys.stdout = sys.stderr = stream
+    # A file handler of its own, so errors are logged even if a library later
+    # replaces sys.stderr.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.FileHandler(path, encoding="utf-8")],
+        force=True,
+    )
+    logging.getLogger("reality_check").info("RealityCheck started")
     return path
 
 
