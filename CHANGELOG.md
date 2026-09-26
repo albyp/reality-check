@@ -5,6 +5,8 @@ All notable changes to RealityCheck. Format based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-26
+
 ### Added
 - Project title in Setup (and `--title` on the command line). Used in the
   report heading and in export names: `<title>_RealityCheck.pdf`, `.html`,
