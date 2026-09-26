@@ -1,0 +1,10 @@
+# Ignore the sample_data directory
+/sample_data
+# Python virtual environment
+.venv/
+__pycache__/
+
+# Build output
+build/
+dist/
+*.egg-info/
