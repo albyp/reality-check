@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -326,12 +327,72 @@ def write_pdf(session: Session, renderer: ChipRenderer, path: Path, warnings: li
         src = Path(tmp) / "report.html"
         write_html(session, renderer, src, warnings)
         profile = Path(tmp) / "profile"  # isolated profile so a running Edge window is not reused
-        cmd = [browser, "--headless=new", "--disable-gpu", "--no-pdf-header-footer", f"--user-data-dir={profile}",
-               f"--print-to-pdf={path}", src.as_uri()]
-        # stdin=DEVNULL: a windowed exe has no valid stdin handle to pass on.
-        proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180,
-                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if not path.exists():
-            detail = proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}"
-            raise RuntimeError(f"PDF export failed: {detail}")
+        printed = Path(tmp) / "report.pdf"
+        _print_to_pdf(browser, src, printed, profile)
+        shutil.move(printed, path)
     return path
+
+
+def _print_to_pdf(browser: str, src: Path, out: Path, profile: Path, timeout: float = 180) -> None:
+    """Print src to out with headless Edge/Chrome, and wait for a complete PDF.
+
+    The browser's exit is not a reliable signal. From a GUI process, the
+    launcher can exit (code 0) before a helper process has written the PDF,
+    or helper processes can keep running long after the PDF is done. So the
+    browser runs detached (no pipes for helpers to hold open), completion is
+    judged from the file itself, and the print job's processes are then
+    closed.
+    """
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    cmd = [browser, "--headless=new", "--disable-gpu", "--no-pdf-header-footer", f"--user-data-dir={profile}",
+           f"--print-to-pdf={out}", src.as_uri()]
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            creationflags=no_window)
+    deadline = time.monotonic() + timeout
+    exited_at = None
+    last_size, stable_since = -1, None
+    try:
+        while time.monotonic() < deadline:
+            if out.exists():
+                size = out.stat().st_size
+                if size > 0 and size == last_size and _pdf_complete(out):
+                    stable_since = stable_since or time.monotonic()
+                    if time.monotonic() - stable_since >= 0.5:
+                        return
+                else:
+                    stable_since = None
+                last_size = size
+            if proc.poll() is not None:
+                exited_at = exited_at or time.monotonic()
+                if time.monotonic() - exited_at > 20 and not out.exists():
+                    raise RuntimeError(f"PDF export failed: the browser closed (exit code {proc.returncode}) "
+                                       "without writing a PDF")
+            time.sleep(0.25)
+        raise RuntimeError(f"PDF export failed: no complete PDF after {timeout:.0f} s")
+    finally:
+        _close_print_job(proc, profile)
+
+
+def _pdf_complete(pdf: Path) -> bool:
+    try:
+        with open(pdf, "rb") as f:
+            f.seek(max(0, pdf.stat().st_size - 2048))
+            return b"%%EOF" in f.read()
+    except OSError:
+        return False
+
+
+def _close_print_job(proc: subprocess.Popen, profile: Path) -> None:
+    """End the browser processes of this print job, found by their private profile folder."""
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if proc.poll() is None:
+        proc.kill()
+    marker = str(profile).replace("'", "''")
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe'\" | "
+          f"Where-Object {{ $_.CommandLine -like '*{marker}*' }} | "
+          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, creationflags=no_window)
+    except (OSError, subprocess.SubprocessError):
+        pass  # leftover helpers exit on their own; the PDF is already complete
