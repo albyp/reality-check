@@ -7,6 +7,7 @@ re-reported. Manual adjustments and enable/disable flags live here.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -29,6 +30,7 @@ SESSION_SUFFIX = ".rcheck.json"
 
 @dataclass
 class Settings:
+    project_title: str = ""  # blank = control file name
     cloud_radius: float = 0.5  # m, plan radius for cloud Z
     cloud_classes: list[int] | None = None  # None = all classes
     control_crs: str | None = None  # CRS library entry name, None = same as datasets
@@ -83,6 +85,30 @@ class Session:
             },
             created=d.get("created", ""),
         )
+
+
+OUTPUT_NAMES = {
+    "pdf": "{stem}.pdf",
+    "html": "{stem}.html",
+    "residuals": "{stem}_residuals.csv",
+    "summary": "{stem}_summary.csv",
+    "session": "{stem}" + SESSION_SUFFIX,
+}
+
+
+def project_title(session: Session) -> str:
+    return session.settings.project_title.strip() or Path(session.control_path).stem
+
+
+def safe_filename(text: str) -> str:
+    """Make text usable as a Windows file name."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text).strip(" .")
+    return cleaned or "project"
+
+
+def output_name(session: Session, kind: str) -> str:
+    """Default file name for an output, e.g. 'Pit 3 Sept_RealityCheck.pdf'."""
+    return OUTPUT_NAMES[kind].format(stem=f"{safe_filename(project_title(session))}_RealityCheck")
 
 
 def _enum_value(o):
