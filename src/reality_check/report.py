@@ -17,7 +17,8 @@ from reality_check.models import CheckKind, DatasetKind, ObsSource, ObsStatus, R
 from reality_check.raster import raster_info
 from reality_check.render import ChipRenderer, to_data_url
 from reality_check.review import point_results
-from reality_check.session import Session
+from reality_check.overview import render_overview
+from reality_check.session import Session, project_title
 from reality_check.stats import summarise
 
 KIND_LABEL = {DatasetKind.ORTHO: "Orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "Point cloud"}
@@ -66,6 +67,9 @@ ul.issues { margin:0; padding-left:18px; }
 .chips figure { margin:0; }
 .chips img { width:100%; display:block; border-radius:4px; }
 .chips figcaption { font-size:11px; color:var(--muted); margin-top:2px; }
+figure.overview { margin:0; break-inside:avoid; }
+figure.overview img { width:100%; display:block; border:1px solid var(--line); border-radius:4px; }
+figure.overview figcaption { font-size:11px; color:var(--muted); margin-top:4px; }
 .warn { background:#fff8e8; border:1px solid #f0d49a; border-radius:6px; padding:8px 12px; margin-top:12px; }
 .note { color:var(--muted); font-size:12px; }
 .table-wrap { overflow-x:auto; }
@@ -74,6 +78,7 @@ ul.issues { margin:0; padding-left:18px; }
   main { padding:0; max-width:none; }
   h2 { break-after:avoid; }
   .page-break { break-before:page; }
+  figure.overview img { width:auto; max-width:100%; max-height:235mm; margin:0 auto; }
 }
 """
 
@@ -102,7 +107,7 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
     z_ds = [d for d in session.datasets if d.kind in (DatasetKind.DEM, DatasetKind.CLOUD)]
     xy_ds = [d for d in session.datasets if any(o.dataset_id == d.id and o.check is CheckKind.XY
                                                   for o in session.observations)]
-    title = title or Path(session.control_path).stem
+    title = title or project_title(session)
     out: list[str] = []
     w = out.append
 
@@ -146,6 +151,12 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
               f"<div class='v'>{_mm(st.rmse, False)} <small>mm</small> {verdict}</div>"
               f"<div class='k'>{bias}SD {_mm(st.sd, False)} mm</div></div>")
     w("</div>")
+
+    w("<h2>Site overview</h2>")
+    overview = render_overview(session)
+    w(f"<figure class='overview'><img src='{to_data_url(overview, 'JPEG')}' alt='Site overview with control points'>"
+      "<figcaption>Ellipses show horizontal error (semi-axes dX and dY, exaggerated by the stated factor); "
+      "the line points in the error direction. Colour shows dZ.</figcaption></figure>")
 
     w("<h2>Statistics</h2><div class='table-wrap'><table><tr><th>Dataset</th><th>Component</th><th>Points</th>"
       "<th class='n'>n</th><th class='n'>Bias (mean)</th><th class='n'>SD</th><th class='n'>RMSE</th>"
