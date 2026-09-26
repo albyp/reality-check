@@ -19,7 +19,7 @@ from reality_check.export import write_residuals, write_summary
 from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
 from reality_check.report import write_html, write_pdf
-from reality_check.session import SESSION_SUFFIX, Settings
+from reality_check.session import Settings, output_name
 from reality_check.stats import summarise
 
 
@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--dem", action="append", default=[], help="DEM GeoTIFF (repeatable)")
     r.add_argument("--cloud", action="append", default=[], help="point cloud LAS/LAZ/XYZ (repeatable)")
     r.add_argument("--out", required=True, type=Path, help="output folder")
+    r.add_argument("--title", default="", help="project title (default: control file name)")
     r.add_argument("--radius", type=float, default=0.5, help="cloud Z search radius in metres (default 0.5)")
     r.add_argument("--classes", type=_ints, default=None, help="cloud classes to use, e.g. 2,11 (default all)")
     r.add_argument("--control-crs", default=None, help="CRS library entry the control points are in")
@@ -72,23 +73,23 @@ def cmd_run(a) -> int:
         print("error: give at least one --ortho, --dem or --cloud", file=sys.stderr)
         return 2
     settings = Settings(
-        cloud_radius=a.radius, cloud_classes=a.classes, control_crs=a.control_crs,
+        project_title=a.title, cloud_radius=a.radius, cloud_classes=a.classes, control_crs=a.control_crs,
         tol_z=a.tol_z, tol_xy=a.tol_xy, report_chip_size=a.chip_size,
     )
     a.out.mkdir(parents=True, exist_ok=True)
     result = run(a.control, datasets, settings)
     s = result.session
-    s.save(a.out / f"session{SESSION_SUFFIX}")
+    s.save(a.out / output_name(s, "session"))
     renderer = ChipRenderer(s, result.windows)
     try:
-        write_html(s, renderer, a.out / "report.html", result.warnings)
+        write_html(s, renderer, a.out / output_name(s, "html"), result.warnings)
         if a.pdf:
-            write_pdf(s, renderer, a.out / "report.pdf", result.warnings)
+            write_pdf(s, renderer, a.out / output_name(s, "pdf"), result.warnings)
     finally:
         renderer.close()
     if a.csv:
-        write_residuals(s, a.out / "residuals.csv")
-        write_summary(s, a.out / "summary.csv")
+        write_residuals(s, a.out / output_name(s, "residuals"))
+        write_summary(s, a.out / output_name(s, "summary"))
 
     print()
     print(f"{'dataset':38} {'check':5} {'comp':4} {'group':10} {'n':>3} {'mean':>8} {'sd':>8} {'rmse':>8}")

@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -17,7 +18,8 @@ from reality_check.models import CheckKind, DatasetKind, ObsSource, ObsStatus, R
 from reality_check.raster import raster_info
 from reality_check.render import ChipRenderer, to_data_url
 from reality_check.review import point_results
-from reality_check.session import Session
+from reality_check.overview import render_overview
+from reality_check.session import Session, project_title
 from reality_check.stats import summarise
 
 KIND_LABEL = {DatasetKind.ORTHO: "Orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "Point cloud"}
@@ -66,20 +68,64 @@ ul.issues { margin:0; padding-left:18px; }
 .chips figure { margin:0; }
 .chips img { width:100%; display:block; border-radius:4px; }
 .chips figcaption { font-size:11px; color:var(--muted); margin-top:2px; }
+figure.overview { margin:0; break-inside:avoid; }
+figure.overview img { width:100%; display:block; border:1px solid var(--line); border-radius:4px; }
+figure.overview figcaption { font-size:11px; color:var(--muted); margin-top:4px; }
 .warn { background:#fff8e8; border:1px solid #f0d49a; border-radius:6px; padding:8px 12px; margin-top:12px; }
 .note { color:var(--muted); font-size:12px; }
 .table-wrap { overflow-x:auto; }
+h2 .cont { font-weight:400; font-size:13px; color:var(--muted); }
+.print-only { display:none; }
 @media print {
   @page { size:A4; margin:12mm; }
   main { padding:0; max-width:none; }
+  /* A heading and its content print together; a block longer than a page is
+     split into page-sized parts (see _table_block). */
+  .block { break-inside:avoid; }
   h2 { break-after:avoid; }
+  thead { display:table-header-group; }
+  tr { break-inside:avoid; }
+  .table-wrap { overflow:visible; }
+  .screen-only { display:none; }
+  .print-only { display:block; }
   .page-break { break-before:page; }
+  figure.overview img { width:auto; max-width:100%; max-height:235mm; margin:0 auto; }
 }
 """
 
 
 def _e(s) -> str:
     return html.escape(str(s))
+
+
+# Rows of a report table that fit on one printed A4 page with the heading and
+# header row (13 px text, 12 mm margins). Longer tables are split at this size.
+PRINT_ROWS_PER_PAGE = 30
+
+
+def _table_block(title: str, head: str, rows: list[str], after: str = "", rows_per_page: int = PRINT_ROWS_PER_PAGE) -> str:
+    """A heading with its table, kept together in print.
+
+    head is the header row's cells; rows are complete <tr> elements. A table
+    that fits on a page prints as one block. A longer one prints as
+    page-sized parts, each with the heading ("(continued…)" after the first)
+    and the header row. On screen it is always one table.
+    """
+    thead = f"<thead><tr>{head}</tr></thead>"
+
+    def block(heading: str, body: list[str], cls: str, tail: str) -> str:
+        return (f"<section class='block {cls}'><h2>{heading}</h2><div class='table-wrap'><table>{thead}"
+                f"<tbody>{''.join(body)}</tbody></table></div>{tail}</section>")
+
+    if len(rows) <= rows_per_page:
+        return block(title, rows, "", after)
+    parts = [rows[i:i + rows_per_page] for i in range(0, len(rows), rows_per_page)]
+    out = [block(title, rows, "screen-only", after)]
+    for i, part in enumerate(parts):
+        heading = title if i == 0 else f"{title} <span class='cont'>(continued…)</span>"
+        cls = "print-only" + (" page-break" if i else "")
+        out.append(block(heading, part, cls, after if i == len(parts) - 1 else ""))
+    return "".join(out)
 
 
 def _mm(v: float | None, signed: bool = True) -> str:
@@ -102,7 +148,7 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
     z_ds = [d for d in session.datasets if d.kind in (DatasetKind.DEM, DatasetKind.CLOUD)]
     xy_ds = [d for d in session.datasets if any(o.dataset_id == d.id and o.check is CheckKind.XY
                                                   for o in session.observations)]
-    title = title or Path(session.control_path).stem
+    title = title or project_title(session)
     out: list[str] = []
     w = out.append
 
@@ -129,7 +175,7 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
         w(f"<div class='warn'>{_e(m)}</div>")
 
     # Headline cards: checkpoints if roles are known, else all points.
-    w("<h2>Summary</h2><div class='cards'>")
+    w("<section class='block'><h2>Summary</h2><div class='cards'>")
     for d in session.datasets:
         for comp, label, tolv in (("dz", "Z", s.tol_z), ("dxy", "XY", s.tol_xy)):
             rows = [r for r in summary if r.dataset_id == d.id and r.component == comp]
@@ -145,45 +191,56 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
             w(f"<div class='card'><div class='k'>{KIND_LABEL[d.kind]} {label} RMSE · {group} (n={st.n})</div>"
               f"<div class='v'>{_mm(st.rmse, False)} <small>mm</small> {verdict}</div>"
               f"<div class='k'>{bias}SD {_mm(st.sd, False)} mm</div></div>")
-    w("</div>")
+    w("</div></section>")
 
-    w("<h2>Statistics</h2><div class='table-wrap'><table><tr><th>Dataset</th><th>Component</th><th>Points</th>"
-      "<th class='n'>n</th><th class='n'>Bias (mean)</th><th class='n'>SD</th><th class='n'>RMSE</th>"
-      "<th class='n'>Max |residual|</th></tr>")
+    overview = render_overview(session)
+    w(f"<section class='block'><h2>Site overview</h2><figure class='overview'><img src='{to_data_url(overview, 'JPEG')}' alt='Site overview with control points'>"
+      "<figcaption>Ellipses show horizontal error (semi-axes dX and dY, exaggerated by the stated factor); "
+      "the line points in the error direction. Colour shows dZ.</figcaption></figure></section>")
+
+    stat_rows = []
     for r in summary:
         st = r.stats
-        w(f"<tr><td>{_e(Path(ds_by_id[r.dataset_id].path).name)}</td><td>{COMPONENT_LABEL[r.component]}</td>"
-          f"<td>{_e(r.group)}</td><td class='n'>{st.n}</td><td class='n'>{_mm(st.mean) if r.component != 'dxy' else '–'}</td>"
-          f"<td class='n'>{_mm(st.sd, False)}</td><td class='n'>{_mm(st.rmse, False)}</td>"
-          f"<td class='n'>{_mm(max(abs(st.min), abs(st.max)), False)}</td></tr>")
-    w("</table></div><p class='note'>All values in mm. Residual = dataset minus surveyed point. "
-      "Bias is the mean residual (a systematic offset). RMSE combines bias and scatter (RMSE² ≈ bias² + SD²). "
-      "Disabled points are excluded. GCPs were used in processing, so only checkpoints give an independent accuracy figure.</p>")
+        stat_rows.append(
+            f"<tr><td>{_e(Path(ds_by_id[r.dataset_id].path).name)}</td><td>{COMPONENT_LABEL[r.component]}</td>"
+            f"<td>{_e(r.group)}</td><td class='n'>{st.n}</td><td class='n'>{_mm(st.mean) if r.component != 'dxy' else '–'}</td>"
+            f"<td class='n'>{_mm(st.sd, False)}</td><td class='n'>{_mm(st.rmse, False)}</td>"
+            f"<td class='n'>{_mm(max(abs(st.min), abs(st.max)), False)}</td></tr>")
+    w(_table_block(
+        "Statistics",
+        "<th>Dataset</th><th>Component</th><th>Points</th><th class='n'>n</th><th class='n'>Bias (mean)</th>"
+        "<th class='n'>SD</th><th class='n'>RMSE</th><th class='n'>Max |residual|</th>",
+        stat_rows,
+        after="<p class='note'>All values in mm. Residual = dataset minus surveyed point. "
+              "Bias is the mean residual (a systematic offset). RMSE combines bias and scatter (RMSE² ≈ bias² + SD²). "
+              "Disabled points are excluded. GCPs were used in processing, so only checkpoints give an independent "
+              "accuracy figure.</p>"))
 
     issues = _issues(session, results, ds_by_id)
-    w("<h2>Items to review</h2>")
-    w("<ul class='issues'>" + "".join(f"<li>{i}</li>" for i in issues) + "</ul>" if issues else "<p class='muted'>None.</p>")
+    body = ("<ul class='issues'>" + "".join(f"<li>{i}</li>" for i in issues) + "</ul>") if issues \
+        else "<p class='muted'>None.</p>"
+    w(f"<section class='block'><h2>Items to review</h2>{body}</section>")
 
     # Point table
-    w("<h2>Control points</h2><div class='table-wrap'><table><tr><th>Point</th><th>Role</th>")
-    for d in z_ds:
-        w(f"<th class='n'>dZ {KIND_LABEL[d.kind].lower()}</th>")
-    for d in xy_ds:
-        w(f"<th class='n'>dXY {KIND_LABEL[d.kind].lower()}</th>")
-    w("<th>Flags</th></tr>")
+    head = "<th>Point</th><th>Role</th>"
+    head += "".join(f"<th class='n'>dZ {KIND_LABEL[d.kind].lower()}</th>" for d in z_ds)
+    head += "".join(f"<th class='n'>dXY {KIND_LABEL[d.kind].lower()}</th>" for d in xy_ds)
+    head += "<th>Flags</th>"
+    point_rows = []
     for pr in results:
         cp = pr.point
-        w(f"<tr><td><a href='#pt-{_e(cp.id)}'>{_e(cp.id)}</a></td><td>{_role_text(cp.role)}</td>")
+        cells = [f"<td><a href='#pt-{_e(cp.id)}'>{_e(cp.id)}</a></td><td>{_role_text(cp.role)}</td>"]
         for d in z_ds:
             v = pr.dz.get(d.id)
             txt = _mm(v) if v is not None else _status_short(pr, d.id, CheckKind.Z)
-            w(f"<td class='n {_tol_class(v, s.tol_z)}'>{txt}</td>")
+            cells.append(f"<td class='n {_tol_class(v, s.tol_z)}'>{txt}</td>")
         for d in xy_ds:
             v = pr.dxy.get(d.id)
             txt = _mm(v, False) if v is not None else _status_short(pr, d.id, CheckKind.XY)
-            w(f"<td class='n {_tol_class(v, s.tol_xy, False)}'>{txt}</td>")
-        w(f"<td>{_flags(pr)}</td></tr>")
-    w("</table></div>")
+            cells.append(f"<td class='n {_tol_class(v, s.tol_xy, False)}'>{txt}</td>")
+        cells.append(f"<td>{_flags(pr)}</td>")
+        point_rows.append("<tr>" + "".join(cells) + "</tr>")
+    w(_table_block("Control points", head, point_rows))
 
     # Point pages
     w("<h2 class='page-break'>Point details</h2>")
@@ -193,8 +250,8 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
         w(f"<section class='point{'' if cp.enabled else ' disabled'}' id='pt-{_e(cp.id)}'><header>"
           f"<h3>{_e(cp.id)}</h3>{_role_tag(cp.role)}{_flags(pr)}"
           f"<span class='coords'>E {cp.x:.3f} · N {cp.y:.3f} · Z {cp.z:.3f}</span></header>")
-        w("<table><tr><th>Dataset</th><th>Check</th><th class='n'>dX</th><th class='n'>dY</th><th class='n'>dXY</th>"
-          "<th class='n'>dZ</th><th>Result</th></tr>")
+        w("<table><thead><tr><th>Dataset</th><th>Check</th><th class='n'>dX</th><th class='n'>dY</th>"
+          "<th class='n'>dXY</th><th class='n'>dZ</th><th>Result</th></tr></thead><tbody>")
         order = {d.id: i for i, d in enumerate(session.datasets)}
         for (ds_id, check), o in sorted(pr.status.items(), key=lambda kv: (order[kv[0][0]], kv[0][1].value)):
             kind = KIND_LABEL[ds_by_id[ds_id].kind]
@@ -206,7 +263,7 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
             src = " (manual)" if o.source is ObsSource.MANUAL else ""
             extra = f", {o.n_points} pts, spread {_mm(o.spread, False)} mm" if o.n_points and o.spread is not None else ""
             w(f"<tr><td>{kind}</td><td>{check.value.upper()}</td>{cells}<td>{STATUS_LABEL[o.status]}{src}{extra}</td></tr>")
-        w("</table><div class='chips'>")
+        w("</tbody></table><div class='chips'>")
         for d in session.datasets:
             img = renderer.chip(cp.id, d.id, size, px=360)
             w(f"<figure><img src='{to_data_url(img, 'JPEG')}' alt='{_e(cp.id)} {KIND_LABEL[d.kind]}'>"
@@ -309,14 +366,78 @@ def write_pdf(session: Session, renderer: ChipRenderer, path: Path, warnings: li
         raise RuntimeError("PDF export needs Microsoft Edge or Google Chrome. Export HTML and print it instead.")
     path = Path(path).resolve()
     path.unlink(missing_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
+    # Edge's helper processes can keep the temporary profile locked for a moment
+    # after printing; a failed clean-up must not turn a written PDF into an error.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src = Path(tmp) / "report.html"
         write_html(session, renderer, src, warnings)
         profile = Path(tmp) / "profile"  # isolated profile so a running Edge window is not reused
-        cmd = [browser, "--headless=new", "--disable-gpu", "--no-pdf-header-footer", f"--user-data-dir={profile}",
-               f"--print-to-pdf={path}", src.as_uri()]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180,
-                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if not path.exists():
-            raise RuntimeError(f"PDF export failed: {proc.stderr.strip() or proc.stdout.strip()}")
+        printed = Path(tmp) / "report.pdf"
+        _print_to_pdf(browser, src, printed, profile)
+        shutil.move(printed, path)
     return path
+
+
+def _print_to_pdf(browser: str, src: Path, out: Path, profile: Path, timeout: float = 180) -> None:
+    """Print src to out with headless Edge/Chrome, and wait for a complete PDF.
+
+    The browser's exit is not a reliable signal. From a GUI process, the
+    launcher can exit (code 0) before a helper process has written the PDF,
+    or helper processes can keep running long after the PDF is done. So the
+    browser runs detached (no pipes for helpers to hold open), completion is
+    judged from the file itself, and the print job's processes are then
+    closed.
+    """
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    cmd = [browser, "--headless=new", "--disable-gpu", "--no-pdf-header-footer", f"--user-data-dir={profile}",
+           f"--print-to-pdf={out}", src.as_uri()]
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            creationflags=no_window)
+    deadline = time.monotonic() + timeout
+    exited_at = None
+    last_size, stable_since = -1, None
+    try:
+        while time.monotonic() < deadline:
+            if out.exists():
+                size = out.stat().st_size
+                if size > 0 and size == last_size and _pdf_complete(out):
+                    stable_since = stable_since or time.monotonic()
+                    if time.monotonic() - stable_since >= 0.5:
+                        return
+                else:
+                    stable_since = None
+                last_size = size
+            if proc.poll() is not None:
+                exited_at = exited_at or time.monotonic()
+                if time.monotonic() - exited_at > 20 and not out.exists():
+                    raise RuntimeError(f"PDF export failed: the browser closed (exit code {proc.returncode}) "
+                                       "without writing a PDF")
+            time.sleep(0.25)
+        raise RuntimeError(f"PDF export failed: no complete PDF after {timeout:.0f} s")
+    finally:
+        _close_print_job(proc, profile)
+
+
+def _pdf_complete(pdf: Path) -> bool:
+    try:
+        with open(pdf, "rb") as f:
+            f.seek(max(0, pdf.stat().st_size - 2048))
+            return b"%%EOF" in f.read()
+    except OSError:
+        return False
+
+
+def _close_print_job(proc: subprocess.Popen, profile: Path) -> None:
+    """End the browser processes of this print job, found by their private profile folder."""
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if proc.poll() is None:
+        proc.kill()
+    marker = str(profile).replace("'", "''")
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe'\" | "
+          f"Where-Object {{ $_.CommandLine -like '*{marker}*' }} | "
+          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, creationflags=no_window)
+    except (OSError, subprocess.SubprocessError):
+        pass  # leftover helpers exit on their own; the PDF is already complete

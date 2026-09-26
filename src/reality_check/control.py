@@ -3,6 +3,11 @@
 Headers are matched by common survey names (for example "Label",
 "X/Easting", "Z/Altitude"). A leading "#" on the header line is allowed.
 Files without a header are read as id, x, y, z.
+
+An optional role column marks each point as a GCP or a checkpoint. Metashape's
+marker export calls it "Enable": 1 = the marker was used as a control point
+(GCP), 0 = it was a check point. Every point stays enabled in RealityCheck;
+checkpoints are the independent ones the QA needs most.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ _ALIASES = {
     "x": {"x", "e", "east", "easting", "xeasting"},
     "y": {"y", "n", "north", "northing", "ynorthing"},
     "z": {"z", "h", "rl", "elev", "elevation", "height", "alt", "altitude", "zaltitude"},
-    "role": {"role", "type", "used", "usage", "enabled", "gcp"},
+    "role": {"role", "type", "used", "usage", "enable", "enabled", "gcp"},
 }
 
 _GCP_VALUES = {"gcp", "control", "used", "yes", "y", "true", "1"}
