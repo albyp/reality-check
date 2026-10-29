@@ -26,6 +26,22 @@ All notable changes to RealityCheck. Format based on
 ### Fixed
 - RealityCheck's own exports (`*_RealityCheck*`) are never picked up as
   inputs when a folder is scanned.
+- Folder pickers (project folder, batch folders, output folder) use the
+  native Windows folder dialog in browser mode, in front of the browser,
+  like the file dialogs fixed in 0.2.1.
+
+## [0.2.1] - 2026-10-29
+
+### Fixed
+- Browse buttons did nothing when RealityCheck ran in a browser tab (the
+  fallback when its own window cannot start). The file dialog opened behind
+  the browser. Browse, Save and export now use the Windows file dialogs
+  directly, owned by the browser window, so they open on top of it. A dialog
+  failure now shows a message instead of doing nothing.
+- When the desktop window cannot start, RealityCheck says so: a banner
+  explains that it is running in the browser, that drag and drop is not
+  available there, how to get the window (install the Microsoft Edge
+  WebView2 Runtime), and the reason. The reason is also written to the log.
 
 ## [0.2.0] - 2026-09-26
 

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from nicegui import app, run, ui
 
-from reality_check import __version__, appsettings
+from reality_check import __version__, appsettings, windialogs
 from reality_check.batch import BatchOptions, BatchResult, plan, run_one
 from reality_check.cloud import CLASS_NAMES, Chunk, is_classified
 from reality_check.detect import detect
@@ -67,6 +67,7 @@ class State:
     dirty: bool = False
     busy: bool = False
     desktop: bool = False  # running in the pywebview window (drag and drop gives full paths)
+    fallback_reason: str = ""  # why the desktop window could not start (browser mode instead)
     window: object | None = None  # the pywebview window, for native file dialogs
     app: appsettings.AppSettings | None = None  # settings.json: defaults and templates
     template_name: str = ""  # Setup: template for a project folder ("" = the default template)
@@ -118,7 +119,10 @@ window.addEventListener('drop', e => { e.preventDefault(); if (!window.pywebview
 # ---------- native file dialogs (the server runs on the user's own PC) ----------
 #
 # In the desktop window, use pywebview's dialogs: they belong to the app window,
-# so they always open on top of it. In browser mode, fall back to tkinter.
+# so they always open on top of it. In browser mode, use the Windows dialogs
+# directly (windialogs), owned by the browser window so they open on top of it.
+# tkinter is the last resort (non-Windows development only): from a background
+# process its dialog can open behind the browser.
 
 def _tk_dialog(kind: str, title: str, types, initial: str = "", directory: str = "") -> str:
     import tkinter as tk
@@ -161,10 +165,27 @@ def _webview_dialog(kind: str, types, initial: str = "", directory: str = "") ->
     return path
 
 
+def _win_dialog(kind: str, title: str, types, initial: str = "", directory: str = "") -> str:
+    if kind == "folder":
+        return windialogs.pick_folder(title, directory)
+    if kind == "open":
+        return windialogs.open_file(title, types, directory)
+    return windialogs.save_file(title, types, initial, directory)
+
+
 async def _dialog(kind: str, title: str, types, initial: str = "", directory: str = "") -> str:
-    if S.window is not None:
-        return await run.io_bound(_webview_dialog, kind, types, initial, directory)
-    return await run.io_bound(_tk_dialog, kind, title, types, initial, directory)
+    try:
+        if S.window is not None:
+            return await run.io_bound(_webview_dialog, kind, types, initial, directory)
+        if windialogs.available():
+            return await run.io_bound(_win_dialog, kind, title, types, initial, directory)
+        return await run.io_bound(_tk_dialog, kind, title, types, initial, directory)
+    except Exception as e:  # noqa: BLE001 - a dialog failure must never be silent
+        log.exception("File dialog failed")
+        ui.notify(f"Could not open the file dialog: {type(e).__name__}: {e}. You can paste a path into the box "
+                  "instead (Shift + right-click a file in Explorer, then Copy as path).", type="negative",
+                  multi_line=True, timeout=15000, close_button=True)
+        return ""
 
 
 async def ask_open(title: str, types, directory: str = "") -> str:
@@ -229,6 +250,14 @@ def index() -> None:
         ui.button("Save session", icon="save", on_click=lambda: save_session()).props("flat")
 
     app_settings()
+    if S.fallback_reason:
+        with ui.card().classes("w-full q-pa-sm").style("background:#fff8e8; border:1px solid #f0d49a"):
+            ui.label("RealityCheck could not open its own window on this computer, so it is running in your "
+                     "browser. Everything works except drag and drop: use the Browse buttons, or paste a path.").classes(
+                "text-body2")
+            ui.label("To get the desktop window, install the Microsoft Edge WebView2 Runtime "
+                     "(https://developer.microsoft.com/microsoft-edge/webview2/), then restart RealityCheck. "
+                     f"Reason: {S.fallback_reason}").classes("text-caption text-grey-8")
     with ui.tabs().classes("w-full bg-white text-primary shadow-1").props("align=left inline-label") as tabs:
         t_setup = ui.tab("Setup", icon="tune")
         t_review = ui.tab("Review", icon="fact_check")
@@ -1226,10 +1255,12 @@ def start_desktop() -> None:
     try:
         run_desktop()
     except Exception as e:  # noqa: BLE001
-        print(f"Desktop window unavailable ({e}); opening in the browser instead.")
+        log.exception("Desktop window unavailable; opening in the browser instead")
         S.desktop = False
+        S.window = None
+        S.fallback_reason = f"{type(e).__name__}: {e}"
         start()
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    start()
+    start_desktop()
