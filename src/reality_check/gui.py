@@ -11,6 +11,7 @@ reload.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import queue
@@ -89,13 +90,16 @@ def app_settings() -> appsettings.AppSettings:
     """settings.json, loaded once. The first load also sets the run defaults."""
     if S.app is None:
         S.app = appsettings.load()
-        d = S.app.defaults
         if S.session is None:
-            S.settings = Settings(tol_z=d.tol_z, tol_xy=d.tol_xy, cloud_radius=d.cloud_radius,
-                                  report_chip_size=d.report_chip_size)
+            S.settings = _default_settings()
         S.template_name = S.template_name or S.app.default_template
         S.batch_template = S.batch_template or S.app.default_template
     return S.app
+
+
+def _default_settings() -> Settings:
+    d = app_settings().defaults
+    return Settings(tol_z=d.tol_z, tol_xy=d.tol_xy, cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size)
 
 
 def _template_names() -> list[str]:
@@ -227,6 +231,37 @@ def _new_renderer() -> None:
 
 def _mark_dirty() -> None:
     S.dirty = True
+
+
+def clear_all() -> None:
+    """Forget the inputs and results, and close every file RealityCheck holds open."""
+    if S.renderer is not None:
+        S.renderer.close()
+    S.renderer = None
+    S.inputs = {role: "" for role in ROLES}
+    S.settings = _default_settings()
+    S.session = S.session_path = S.selected = None
+    S.windows, S.warnings = {}, []
+    S.project_dir, S.dirty = "", False
+    gc.collect()  # drop the point cloud samples now, not later
+    log.info("Cleared inputs and results")
+
+
+async def confirm_clear() -> None:
+    if S.busy:
+        ui.notify("Wait for the run to finish first.", type="warning")
+        return
+    if S.dirty:
+        with ui.dialog() as dialog, ui.card():
+            ui.label("Clear without saving?").classes("text-h6")
+            ui.label("The review work in this session has not been saved.").classes("text-body2")
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
+                ui.button("Clear", on_click=lambda: dialog.submit(True)).props("color=negative")
+        if not await dialog:
+            return
+    clear_all()
+    ui.navigate.reload()
 
 
 # ---------- page ----------
@@ -451,6 +486,9 @@ def setup_panel(panels, t_review) -> None:
 
             with ui.row().classes("items-center gap-3 q-mt-sm"):
                 run_btn = ui.button("Run checks", icon="play_arrow", on_click=do_run)
+                ui.button("Clear", icon="restart_alt", on_click=confirm_clear).props("outline").tooltip(
+                    "Start fresh: empty the inputs, drop the results and release the files so they can be "
+                    "updated outside RealityCheck")
                 spinner = ui.spinner(size="md")
                 spinner.set_visibility(False)
 
