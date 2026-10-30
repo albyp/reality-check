@@ -33,6 +33,7 @@ class Defaults:
     cloud_radius: float = 0.5  # m
     report_chip_size: float = 2.0  # m
     trim: float = 0.10  # average offsets: fraction of dZ values left out (0.10 = 90% trimmed mean)
+    spot_max_outside: float = 10.0  # m; spot heights further than this from all data are disregarded
 
 
 @dataclass
