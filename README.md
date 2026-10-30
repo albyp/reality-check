@@ -38,7 +38,11 @@ protected your PC". Click *More info*, then *Run anyway*.
 Spot heights are surveyed ground levels with no physical mark, on hardstand
 or soft ground. They get a Z check only (no target, no XY, no snapshots) and
 are reported apart from the control points, as supporting evidence when a
-vertical shift or a reprocess is considered.
+vertical shift or a reprocess is considered. A spot height more than 10 m
+(`spot_max_outside`) from the DEM and point cloud data is disregarded: left
+out of the table and averages, and listed under the table with its distance
+to the nearest data. One just off the edge stays in the table as "Outside
+dataset".
 
 All datasets in one run are assumed to share the control points' coordinate
 system. RealityCheck warns if the files say otherwise.
@@ -100,6 +104,7 @@ or on the Settings tab. Its `defaults`:
 | `cloud_radius` | `0.5` | Cloud Z search radius in metres |
 | `report_chip_size` | `2.0` | Report snapshot width in metres |
 | `trim` | `0.1` | Average offsets: fraction of dZ values left out, half from each end. `0.1` = 90% trimmed mean (Excel `TRIMMEAN(…, 0.1)`); `0` = plain mean |
+| `spot_max_outside` | `10.0` | Spot heights further than this (metres) from all DEM and cloud data are disregarded and listed |
 
 ### Batch
 
@@ -150,7 +155,7 @@ reality-check crs list
 `run` writes `<title>_RealityCheck.html` and `<title>_RealityCheck.rcheck.json`
 (open it in the GUI to review). The title defaults to the control file name.
 Options: `--title`, `--pdf`, `--csv`, `--spots FILE` (spot heights),
-`--trim` (default 0.1), `--radius` (cloud Z search radius,
+`--trim` (default 0.1), `--spot-max-outside` (default 10 m), `--radius` (cloud Z search radius,
 default 0.5 m), `--classes 2,11`, `--tol-z`, `--tol-xy`, `--chip-size`,
 `--control-crs NAME` (control points in a local grid from the CRS library).
 
