@@ -131,6 +131,8 @@ def _user32():
         u.AttachThreadInput.argtypes, u.AttachThreadInput.restype = [wintypes.DWORD, wintypes.DWORD, B], B
         u.BringWindowToTop.argtypes, u.BringWindowToTop.restype = [H], B
         u.SetForegroundWindow.argtypes, u.SetForegroundWindow.restype = [H], B
+        u.SendMessageW.argtypes = [H, U, wintypes.WPARAM, wintypes.LPARAM]
+        u.SendMessageW.restype = wintypes.LPARAM
         _USER32 = u
     return _USER32
 
@@ -249,7 +251,7 @@ def pick_folder(title: str, directory: str = "") -> str:
     @BFFCALLBACK
     def callback(hwnd, msg, lparam, data):
         if msg == BFFM_INITIALIZED and start is not None:
-            ctypes.windll.user32.SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, ctypes.addressof(start))
+            _user32().SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, ctypes.addressof(start))
         return 0
 
     info = BROWSEINFOW()
