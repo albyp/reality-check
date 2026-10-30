@@ -21,7 +21,7 @@ from reality_check.render import ChipRenderer
 from reality_check.report import write_html, write_pdf
 from reality_check.review import point_results
 from reality_check.session import Settings, output_name
-from reality_check.stats import summarise
+from reality_check.stats import summarise, z_offsets
 from reality_check.templates import Resolution, Template, resolve
 
 log = logging.getLogger("reality_check")
@@ -62,7 +62,7 @@ def run_one(item: BatchResult, settings: Settings, options: BatchOptions, progre
     datasets = make_datasets([f["ortho"]] if "ortho" in f else [], [f["dem"]] if "dem" in f else [],
                              [f["cloud"]] if "cloud" in f else [])
     project_settings = replace(settings, project_title=item.project.name)
-    result = run(f["control"], datasets, project_settings, progress=progress)
+    result = run(f["control"], datasets, project_settings, progress=progress, spots_path=f.get("spots"))
     s = result.session
     out = Path(options.out_dir) if options.out_dir else item.project
     out.mkdir(parents=True, exist_ok=True)
@@ -108,6 +108,9 @@ def _headline(session) -> list[str]:
             verdict = "" if tol is None else (" PASS" if r.stats.rmse <= tol else " FAIL")
             group = "checkpoints" if r.group == "checkpoint" else "all points"
             out.append(f"{label[kind[ds.id]]} {name} RMSE {r.stats.rmse * 1000:.0f} mm ({group}){verdict}")
+    for o in z_offsets(session.spots, session.spot_observations, session.settings.trim, spots=True):
+        star = "*" if o.trim > 0 else ""
+        out.append(f"{label[kind[o.dataset_id]]} vs {o.n} spot heights {o.mean * 1000:+.0f} mm{star}")
     return out
 
 
