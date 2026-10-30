@@ -180,16 +180,18 @@ class SampleResult:
 def sample_windows(
     path: str,
     centres: dict[str, tuple[float, float]],
-    half: float,
+    half: float | dict[str, float],
     chunk_size: int = 5_000_000,
     xyz_columns: XYZColumns | None = None,
 ) -> SampleResult:
-    """Stream the cloud once. Keep points within +/- half of each centre."""
+    """Stream the cloud once. Keep points within +/- half of each centre
+    (half: one size for all, or a size per centre id)."""
     ids = list(centres)
     cx = np.array([centres[i][0] for i in ids])
     cy = np.array([centres[i][1] for i in ids])
+    hs = np.array([half[i] for i in ids]) if isinstance(half, dict) else np.full(len(ids), half)
     if ids:
-        gx0, gx1, gy0, gy1 = cx.min() - half, cx.max() + half, cy.min() - half, cy.max() + half
+        gx0, gx1, gy0, gy1 = (cx - hs).min(), (cx + hs).max(), (cy - hs).min(), (cy + hs).max()
     else:  # class counts only
         gx0 = gy0 = np.inf
         gx1 = gy1 = -np.inf
@@ -208,7 +210,7 @@ def sample_windows(
             continue
         sub = ch.subset(near)
         for i, pid in enumerate(ids):
-            m = (np.abs(sub.x - cx[i]) <= half) & (np.abs(sub.y - cy[i]) <= half)
+            m = (np.abs(sub.x - cx[i]) <= hs[i]) & (np.abs(sub.y - cy[i]) <= hs[i])
             if m.any():
                 parts[pid].append(sub.subset(m))
     return SampleResult({pid: Chunk.concat(p) for pid, p in parts.items()}, class_counts, total)
