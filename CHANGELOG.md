@@ -30,6 +30,20 @@ All notable changes to RealityCheck. Format based on
   per surface under the summary saying whether it sits above or below the
   control on average, with the median and how many points are above and
   below (checkpoints if set, else all enabled points).
+- Spot heights: an optional second CSV of surveyed ground levels with no
+  physical mark. Z checks only, against the DEM and point cloud (sampled in
+  the same pass over the cloud), kept apart from the control point
+  statistics. The report gets a summary line per surface and a compact
+  Spot heights table (dZ per surface, mean, median, SD, RMSE, counts above
+  and below). Setup input, auto-detect (`*spot*`, `*_sh`), templates
+  (optional: never reported missing), Batch, CSV exports (role `spot`), the
+  session file, and `run --spots` on the command line.
+- Average offsets use a trimmed mean, 90% by default (Excel `TRIMMEAN` with
+  10%), marked with `*` and explained in a note. Set on the Settings tab or
+  as `trim` in `settings.json`; `run --trim` on the command line. The summary
+  CSV gets a `trimmed_mean_90` column.
+- Saved copies of the built-in templates in an existing `settings.json` get
+  the spot heights rule, and their control rule skips spot height files.
 
 ### Fixed
 - RealityCheck's own exports (`*_RealityCheck*`) are never picked up as
@@ -37,6 +51,8 @@ All notable changes to RealityCheck. Format based on
 - Folder pickers (project folder, batch folders, output folder) use the
   native Windows folder dialog in browser mode, in front of the browser,
   like the file dialogs fixed in 0.2.1.
+- The browser-mode folder dialog now opens at the suggested folder (a
+  64-bit address overflowed an untyped Windows call, so it was ignored).
 
 ## [0.2.1] - 2026-10-29
 
