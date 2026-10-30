@@ -89,8 +89,14 @@ orthomosaic, DEM, point cloud and spot heights (optional), a folder relative to 
 | Exports folder | Control CSV in the project folder; `exports/` holds `name.tif`, `name_dem.tif`, `name.laz` |
 | Pix4D (draft) | Pix4Dmapper output folders. **Draft: confirm the paths before relying on it.** |
 
-Add, edit, duplicate and test templates on the **Settings** tab (*Test on a
-folder* shows what a template would pick). Templates and default settings
+Add, edit, duplicate and test templates on the **Settings** tab. Choose an
+*Example project folder* first: each input's folder button then browses
+inside it, and *Test* shows what the template finds there. A folder can use
+`*` for a part that changes per project, for example
+`04_Agisoft/Results_*` for Agisoft's `Results_<job name>` folder. Leave the
+file patterns blank to look for the usual files for that input (shown in
+grey: `*.tif` without DEM names for the orthomosaic, `*dem*`/`*dsm*`/`*dtm*`
+for the DEM, `*.laz`/`*.las` for the cloud, `*spot*` for spot heights). Templates and default settings
 live in `settings.json` next to `RealityCheck.exe`, created on first run. If
 that folder cannot be written to (for example under Program Files),
 `%APPDATA%\RealityCheck\settings.json` is used; the Settings tab shows which.
