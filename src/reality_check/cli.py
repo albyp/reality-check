@@ -44,6 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--trim", type=float, default=0.10,
                    help="average offsets: fraction of dZ values left out, half from each end (default 0.10 = "
                         "90%% trimmed mean; 0 = plain mean)")
+    r.add_argument("--spot-max-outside", type=float, default=10.0,
+                   help="disregard spot heights more than this many metres outside the data (default 10)")
     r.add_argument("--title", default="", help="project title (default: control file name)")
     r.add_argument("--radius", type=float, default=0.5, help="cloud Z search radius in metres (default 0.5)")
     r.add_argument("--classes", type=_ints, default=None, help="cloud classes to use, e.g. 2,11 (default all)")
@@ -93,6 +95,7 @@ def cmd_run(a) -> int:
     settings = Settings(
         project_title=a.title, cloud_radius=a.radius, cloud_classes=a.classes, control_crs=a.control_crs,
         tol_z=a.tol_z, tol_xy=a.tol_xy, report_chip_size=a.chip_size, trim=a.trim,
+        spot_max_outside=a.spot_max_outside,
     )
     a.out.mkdir(parents=True, exist_ok=True)
     result = run(a.control, datasets, settings, spots_path=a.spots)
@@ -156,6 +159,7 @@ def cmd_crs(a) -> int:
 def _settings_from_defaults(app, tol_z=None, tol_xy=None) -> Settings:
     d = app.defaults
     return Settings(cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size, trim=d.trim,
+                    spot_max_outside=d.spot_max_outside,
                     tol_z=d.tol_z if tol_z is None else tol_z, tol_xy=d.tol_xy if tol_xy is None else tol_xy)
 
 
