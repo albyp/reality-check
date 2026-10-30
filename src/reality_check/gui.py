@@ -117,6 +117,24 @@ def _default_settings() -> Settings:
 
 def _template_names() -> list[str]:
     return [t.name for t in app_settings().templates]
+
+
+TEMPLATE_SELECTS: dict[str, ui.select] = {}  # "setup" / "batch" / "default" -> template dropdown on the page
+
+
+def _refresh_template_selects() -> None:
+    """After templates are added, renamed or deleted, update every template dropdown."""
+    names = _template_names()
+    for key, sel in TEMPLATE_SELECTS.items():
+        options = [AUTO] + names if key == "setup" else names
+        current = {"setup": S.template_name, "batch": S.batch_template}.get(key, sel.value)
+        if current not in options:  # renamed or deleted
+            current = AUTO if key == "setup" else app_settings().default_template
+            if key == "setup":
+                S.template_name = current
+            elif key == "batch":
+                S.batch_template = current
+        sel.set_options(options, value=current)
 LOG: queue.Queue[str] = queue.Queue()
 INPUT_FIELDS: dict[str, ui.input] = {}  # role -> input element on the current page
 TITLE_FIELD: list[ui.input] = []  # the Project title input on the current page
@@ -433,9 +451,11 @@ def setup_panel(panels, t_review) -> None:
                 "Used in the report heading and in export names, e.g. <title>_RealityCheck.pdf")
             TITLE_FIELD[:] = [title_inp]
             with ui.row().classes("w-full items-center no-wrap gap-2"):
-                ui.select([AUTO] + _template_names(), value=S.template_name if S.template_name in _template_names()
-                          else AUTO, label="Template",
-                          on_change=lambda e: setattr(S, "template_name", e.value)).classes("w-64").props("dense")
+                setup_tpl = ui.select([AUTO] + _template_names(),
+                                      value=S.template_name if S.template_name in _template_names() else AUTO,
+                                      label="Template", on_change=lambda e: setattr(S, "template_name", e.value)
+                                      ).classes("w-64").props("dense")
+                TEMPLATE_SELECTS["setup"] = setup_tpl
                 folder_inp = ui.input("Project folder", value=S.project_dir).classes("grow").props("dense clearable")
 
                 async def browse_folder():
@@ -911,9 +931,10 @@ def _replan() -> None:
 
 def batch_panel() -> None:
     with ui.row().classes("w-full items-center gap-3"):
-        ui.select(_template_names(), value=S.batch_template if S.batch_template in _template_names() else None,
-                  label="Template", on_change=lambda e: (setattr(S, "batch_template", e.value), _replan())
-                  ).classes("w-72").props("dense")
+        TEMPLATE_SELECTS["batch"] = ui.select(
+            _template_names(), value=S.batch_template if S.batch_template in _template_names() else None,
+            label="Template", on_change=lambda e: (setattr(S, "batch_template", e.value), _replan())
+        ).classes("w-72").props("dense")
 
         async def add_folder():
             path = await ask_folder("Add project folder")
@@ -1051,6 +1072,7 @@ def settings_panel() -> None:
                 "under the spot heights table. Applies to the next run (after Clear if a session is open).")
             default_tpl = ui.select(_template_names(), value=app_.default_template, label="Default template"
                                     ).classes("w-full")
+            TEMPLATE_SELECTS["default"] = default_tpl
 
             def save_defaults():
                 d.tol_z = float(z.value) / 1000 if z.value not in (None, "") else None
@@ -1082,6 +1104,7 @@ def _save_settings() -> None:
     except OSError as e:
         log.exception("Could not save settings")
         ui.notify(f"Could not save {app_settings().path}: {e}", type="negative", multi_line=True)
+    _refresh_template_selects()
 
 
 @ui.refreshable
