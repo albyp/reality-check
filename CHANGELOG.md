@@ -42,6 +42,12 @@ All notable changes to RealityCheck. Format based on
   10%), marked with `*` and explained in a note. Set on the Settings tab or
   as `trim` in `settings.json`; `run --trim` on the command line. The summary
   CSV gets a `trimmed_mean_90` column.
+- Spot heights more than 10 m from all DEM and point cloud data are
+  disregarded: left out of the table and the averages, and listed under the
+  table with their distance to the nearest data (also in the run log and the
+  session file). The cloud's coverage is recorded on a 1 m grid in the same
+  pass. Set as `spot_max_outside` in `settings.json`, on the Settings tab, or
+  `run --spot-max-outside`.
 - Saved copies of the built-in templates in an existing `settings.json` get
   the spot heights rule, and their control rule skips spot height files.
 
