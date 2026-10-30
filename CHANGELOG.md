@@ -48,6 +48,14 @@ All notable changes to RealityCheck. Format based on
   session file). The cloud's coverage is recorded on a 1 m grid in the same
   pass. Set as `spot_max_outside` in `settings.json`, on the Settings tab, or
   `run --spot-max-outside`.
+- Templates: a folder can contain wildcards for the part that changes per
+  project (e.g. `04_Agisoft/Results_*`), and blank file patterns mean the
+  usual files for that input. A control rule never picks a spot heights file
+  when another file matches.
+- Template editor: an example project folder, a folder button per input that
+  browses inside it and fills in the relative path, the default patterns shown
+  in grey, and *Test* showing what each input finds in the example (replaces
+  *Test on a folder*).
 - Saved copies of the built-in templates in an existing `settings.json` get
   the spot heights rule, and their control rule skips spot height files.
 
