@@ -22,6 +22,9 @@ All notable changes to RealityCheck. Format based on
   single output folder, and get a results table with each report and a link
   to open the session in Review.
 - Command line: `batch` and `templates`.
+- Setup: *Clear* button. Empties the inputs, drops the results and closes
+  every file RealityCheck holds open, so the files can be replaced or
+  updated outside RealityCheck. Asks first if review work is unsaved.
 
 ### Fixed
 - RealityCheck's own exports (`*_RealityCheck*`) are never picked up as
