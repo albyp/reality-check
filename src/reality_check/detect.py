@@ -3,6 +3,7 @@
 Rules (a built-in default; user templates come later):
 - Control points: .csv, or a small .txt that loads as control points.
   Names containing gcp / control / check are preferred.
+- Spot heights: the same, with spot (or _sh) in the name.
 - DEM: GeoTIFF with dem / dsm / dtm in the name, or a single-band raster.
 - Orthomosaic: any other GeoTIFF with 3 or more bands.
 - Point cloud: .las / .laz (preferred), then .xyz / .pts / large .txt.
@@ -15,7 +16,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROLES = ("control", "ortho", "dem", "cloud")
+ROLES = ("control", "ortho", "dem", "cloud", "spots")
 TIF = {".tif", ".tiff"}
 LAS = {".las", ".laz"}
 XYZ = {".xyz", ".pts"}
@@ -23,6 +24,7 @@ SMALL_TEXT = 5 * 1024 * 1024  # bytes; larger .txt files are treated as point cl
 MAX_DEPTH = 4
 _DEM_NAME = re.compile(r"(^|[^a-z])(dem|dsm|dtm)([^a-z]|$)", re.I)
 _CONTROL_NAME = re.compile(r"gcp|control|check|ctrl", re.I)
+_SPOT_NAME = re.compile(r"spot|(^|[^a-z])sh([^a-z]|$)", re.I)  # spot heights: *spot*, *_sh.csv
 
 
 @dataclass
@@ -36,11 +38,13 @@ def classify_file(path: str | Path) -> str | None:
     p = Path(path)
     ext = p.suffix.lower()
     if ext == ".csv":
-        return "control"
+        return "spots" if _SPOT_NAME.search(p.stem) else "control"
     if ext in LAS or ext in XYZ:
         return "cloud"
     if ext == ".txt":
-        return "control" if p.stat().st_size < SMALL_TEXT and _loads_as_control(p) else "cloud"
+        if p.stat().st_size < SMALL_TEXT and _loads_as_control(p):
+            return "spots" if _SPOT_NAME.search(p.stem) else "control"
+        return "cloud"
     if ext in TIF:
         return "dem" if _is_dem(p) else "ortho"
     return None
@@ -81,7 +85,7 @@ def _walk(folder: Path) -> list[Path]:
 
 def _rank(role: str, p: Path) -> tuple:
     """Lower sorts first: the preferred candidate for a role."""
-    if role == "control":
+    if role in ("control", "spots"):
         return (not _CONTROL_NAME.search(p.stem), len(p.parts), p.name.lower())
     if role == "cloud":
         return (p.suffix.lower() not in LAS, -p.stat().st_size, p.name.lower())
@@ -136,4 +140,5 @@ def _classify_quiet(p: Path) -> str | None:
         return None
 
 
-_LABEL = {"control": "control point", "ortho": "orthomosaic", "dem": "DEM", "cloud": "point cloud"}
+_LABEL = {"control": "control point", "ortho": "orthomosaic", "dem": "DEM", "cloud": "point cloud",
+          "spots": "spot height"}
