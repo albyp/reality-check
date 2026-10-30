@@ -3,7 +3,7 @@
 All notable changes to RealityCheck. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.3.0] - in development
 
 ### Added
 - Project templates: for each input, a folder relative to the project
@@ -62,6 +62,8 @@ All notable changes to RealityCheck. Format based on
 ### Fixed
 - RealityCheck's own exports (`*_RealityCheck*`) are never picked up as
   inputs when a folder is scanned.
+- Saved templates now appear straight away in the Setup and Batch template
+  lists (they only appeared after a restart).
 - Folder pickers (project folder, batch folders, output folder) use the
   native Windows folder dialog in browser mode, in front of the browser,
   like the file dialogs fixed in 0.2.1.
