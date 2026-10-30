@@ -25,6 +25,11 @@ All notable changes to RealityCheck. Format based on
 - Setup: *Clear* button. Empties the inputs, drops the results and closes
   every file RealityCheck holds open, so the files can be replaced or
   updated outside RealityCheck. Asks first if review work is unsaved.
+- Report: Z comparison table (control Z against each DEM / point cloud Z,
+  point by point, with dZ, above/below and the mean offset), and a line
+  per surface under the summary saying whether it sits above or below the
+  control on average, with the median and how many points are above and
+  below (checkpoints if set, else all enabled points).
 
 ### Fixed
 - RealityCheck's own exports (`*_RealityCheck*`) are never picked up as
