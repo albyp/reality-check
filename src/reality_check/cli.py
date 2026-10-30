@@ -22,7 +22,7 @@ from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
 from reality_check.report import write_html, write_pdf
 from reality_check.session import Settings, output_name
-from reality_check.stats import summarise
+from reality_check.stats import summarise, z_offsets
 
 
 def _ints(s: str) -> list[int]:
@@ -39,7 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--ortho", action="append", default=[], help="orthomosaic GeoTIFF (repeatable)")
     r.add_argument("--dem", action="append", default=[], help="DEM GeoTIFF (repeatable)")
     r.add_argument("--cloud", action="append", default=[], help="point cloud LAS/LAZ/XYZ (repeatable)")
+    r.add_argument("--spots", default=None, help="spot heights CSV (Z checks only, reported separately)")
     r.add_argument("--out", required=True, type=Path, help="output folder")
+    r.add_argument("--trim", type=float, default=0.10,
+                   help="average offsets: fraction of dZ values left out, half from each end (default 0.10 = "
+                        "90%% trimmed mean; 0 = plain mean)")
     r.add_argument("--title", default="", help="project title (default: control file name)")
     r.add_argument("--radius", type=float, default=0.5, help="cloud Z search radius in metres (default 0.5)")
     r.add_argument("--classes", type=_ints, default=None, help="cloud classes to use, e.g. 2,11 (default all)")
@@ -88,10 +92,10 @@ def cmd_run(a) -> int:
         return 2
     settings = Settings(
         project_title=a.title, cloud_radius=a.radius, cloud_classes=a.classes, control_crs=a.control_crs,
-        tol_z=a.tol_z, tol_xy=a.tol_xy, report_chip_size=a.chip_size,
+        tol_z=a.tol_z, tol_xy=a.tol_xy, report_chip_size=a.chip_size, trim=a.trim,
     )
     a.out.mkdir(parents=True, exist_ok=True)
-    result = run(a.control, datasets, settings)
+    result = run(a.control, datasets, settings, spots_path=a.spots)
     s = result.session
     s.save(a.out / output_name(s, "session"))
     renderer = ChipRenderer(s, result.windows)
@@ -114,6 +118,9 @@ def cmd_run(a) -> int:
     bad = [o for o in s.observations if o.status.value != "ok"]
     for o in bad:
         print(f"  {o.point_id} in {o.dataset_id}: {o.status.value}")
+    for o in z_offsets(s.spots, s.spot_observations, settings.trim, spots=True):
+        print(f"{o.dataset_id:38} spot heights: offset {o.mean:+.3f}{'*' if o.trim else ''} "
+              f"median {o.median:+.3f} n {o.n} ({o.above} above, {o.below} below)")
     print(f"\nResults written to {a.out}")
     return 0
 
@@ -148,7 +155,7 @@ def cmd_crs(a) -> int:
 
 def _settings_from_defaults(app, tol_z=None, tol_xy=None) -> Settings:
     d = app.defaults
-    return Settings(cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size,
+    return Settings(cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size, trim=d.trim,
                     tol_z=d.tol_z if tol_z is None else tol_z, tol_xy=d.tol_xy if tol_xy is None else tol_xy)
 
 
