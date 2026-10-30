@@ -20,9 +20,10 @@ from reality_check.render import ChipRenderer, to_data_url
 from reality_check.review import point_results
 from reality_check.overview import render_overview
 from reality_check.session import Session, project_title
-from reality_check.stats import summarise
+from reality_check.stats import LEVEL, summarise, z_offsets
 
 KIND_LABEL = {DatasetKind.ORTHO: "Orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "Point cloud"}
+OFFSET_LABEL = {DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "point cloud"}  # in a sentence
 COMPONENT_LABEL = {"dz": "dZ", "dx": "dX", "dy": "dY", "dxy": "dXY"}
 STATUS_LABEL = {
     ObsStatus.OK: "OK",
@@ -60,6 +61,8 @@ td.n, th.n { text-align:right; }
 .tag.amber { color:var(--warn); border-color:#f0d49a; background:#fff8e8; }
 .tag.blue { color:var(--accent); border-color:#a9d3d8; background:#eef8f9; }
 ul.issues { margin:0; padding-left:18px; }
+ul.offsets { margin:10px 0 0; padding-left:18px; }
+tr.foot td { border-top:2px solid var(--line); border-bottom:none; }
 .point { border:1px solid var(--line); border-radius:6px; padding:12px; margin:0 0 14px; break-inside:avoid; }
 .point.disabled { opacity:.6; }
 .point header { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; margin-bottom:8px; }
@@ -191,7 +194,13 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
             w(f"<div class='card'><div class='k'>{KIND_LABEL[d.kind]} {label} RMSE · {group} (n={st.n})</div>"
               f"<div class='v'>{_mm(st.rmse, False)} <small>mm</small> {verdict}</div>"
               f"<div class='k'>{bias}SD {_mm(st.sd, False)} mm</div></div>")
-    w("</div></section>")
+    w("</div>")
+    offsets = z_offsets(session.points, session.observations)
+    if offsets:
+        w("<ul class='offsets'>" + "".join(
+            f"<li>{_e(o.sentence(OFFSET_LABEL[ds_by_id[o.dataset_id].kind]))}</li>"
+            for o in offsets) + "</ul>")
+    w("</section>")
 
     overview = render_overview(session)
     w(f"<section class='block'><h2>Site overview</h2><figure class='overview'><img src='{to_data_url(overview, 'JPEG')}' alt='Site overview with control points'>"
@@ -242,6 +251,9 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
         point_rows.append("<tr>" + "".join(cells) + "</tr>")
     w(_table_block("Control points", head, point_rows))
 
+    if z_ds:
+        w(_table_block("Z comparison", *_z_table(session, results, z_ds, offsets)))
+
     # Point pages
     w("<h2 class='page-break'>Point details</h2>")
     size = s.report_chip_size
@@ -275,6 +287,41 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
 
     w(f"<p class='note'>RealityCheck {__version__} · QA/QC for photogrammetry and LiDAR</p></main>")
     return "".join(out)
+
+
+def _z_table(session: Session, results, z_ds, offsets) -> tuple[str, list[str], str]:
+    """Control Z against each surface's Z, point by point, with the mean offset at the foot."""
+    tol = session.settings.tol_z
+    head = "<th>Point</th><th>Role</th><th class='n'>Control Z</th>"
+    head += "".join(f"<th class='n'>{KIND_LABEL[d.kind]} Z</th><th class='n'>dZ</th><th></th>" for d in z_ds)
+    rows = []
+    for pr in results:
+        cp = pr.point
+        cells = [f"<td>{_e(cp.id)}</td><td>{_role_text(cp.role)}</td><td class='n'>{cp.z:.3f}</td>"]
+        for d in z_ds:
+            o = pr.status.get((d.id, CheckKind.Z))
+            dz = pr.dz.get(d.id)
+            if dz is None:
+                cells.append(f"<td class='n muted'>{_status_short(pr, d.id, CheckKind.Z)}</td><td></td><td></td>")
+                continue
+            cells.append(f"<td class='n'>{o.z:.3f}</td><td class='n {_tol_class(dz, tol)}'>{_mm(dz)}</td>"
+                         f"<td class='muted'>{_above_below(dz)}</td>")
+        rows.append(f"<tr{' class=muted' if not cp.enabled else ''}>" + "".join(cells) + "</tr>")
+    by_ds = {o.dataset_id: o for o in offsets}
+    foot = ["<td colspan=3><b>Mean offset</b></td>"]
+    for d in z_ds:
+        o = by_ds.get(d.id)
+        foot.append("<td></td><td></td><td></td>" if o is None else
+                    f"<td></td><td class='n'><b>{_mm(o.mean)}</b></td><td class='muted'>{_above_below(o.mean)}</td>")
+    rows.append("<tr class='foot'>" + "".join(foot) + "</tr>")
+    after = ("<p class='note'>Z values in metres, dZ in mm. dZ = surface minus control: positive means the surface "
+             "is higher than the surveyed point. The mean offset uses checkpoints if any are set, otherwise all "
+             "enabled points; disabled points are greyed and excluded.</p>")
+    return head, rows, after
+
+
+def _above_below(dz: float) -> str:
+    return "level" if abs(dz) < LEVEL else ("▲ above" if dz > 0 else "▼ below")
 
 
 def _crs_text(d) -> str:
