@@ -138,3 +138,42 @@ def test_own_outputs_are_never_inputs(tmp_path, control_path, las_path):
     (p / "p_RealityCheck_summary.csv").write_text("x\n")
     res = resolve(_tpl("Project root"), p)
     assert Path(res.found["control"]).name == "gcp.csv" and res.notes == []
+
+
+def _agisoft_project(root: Path) -> Path:
+    """A Benchmark-style project: raw data, Agisoft results in a folder named per job, cache tiles."""
+    proj = root / "261030_TRSH_SPB1_North"
+    files = {
+        "01_Raw/261030AP_GCP.csv": 600, "01_Raw/261030AP2_spots.csv": 900, "01_Raw/00773030.26O": 50,
+        "02_Export/261030_TRSH_SP1B_North_Piecewise.laz": 10, "02_Export/261030_TRSH_SP1B_North_Piecewise.tif": 10,
+        "04_Agisoft/261030_TRSH_SPB1_North.files/0/0/orthomosaic/tile-0-0.tif": 99999,
+        "04_Agisoft/Results_261030_TRSH_SPB1_North/261030_TRSH_SP1B_North.laz": 5000,
+        "04_Agisoft/Results_261030_TRSH_SPB1_North/261030_TRSH_SP1B_North.tif": 3000,
+        "04_Agisoft/Results_261030_TRSH_SPB1_North/261030_TRSH_SP1B_North_DSM.tif": 2000,
+        "04_Agisoft/Results_261030_TRSH_SPB1_North/261030_TRSH_SP1B_North.tfw": 10,
+    }
+    for rel, size in files.items():
+        p = proj / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * size)
+    return proj
+
+
+def test_wildcard_folder_and_blank_patterns_use_the_usual_files(tmp_path):
+    proj = _agisoft_project(tmp_path)
+    # As entered on the Settings tab: folders only (backslash, wildcard), patterns blank except control.
+    t = Template("TRSH", control=RoleRule("01_Raw", ["*.csv"]),
+                 ortho=RoleRule("04_Agisoft\\Results*", recursive=True), dem=RoleRule("04_Agisoft\\Results*"),
+                 cloud=RoleRule("04_Agisoft\\Results*"), spots=RoleRule("01_Raw"))
+    res = resolve(t, proj)
+    names = {role: Path(p).name for role, p in res.found.items()}
+    assert names == {"control": "261030AP_GCP.csv", "spots": "261030AP2_spots.csv",
+                     "ortho": "261030_TRSH_SP1B_North.tif", "dem": "261030_TRSH_SP1B_North_DSM.tif",
+                     "cloud": "261030_TRSH_SP1B_North.laz"}
+    assert res.missing == []
+
+
+def test_unmatched_wildcard_folder_is_reported(tmp_path):
+    proj = _agisoft_project(tmp_path)
+    res = resolve(Template("x", control=RoleRule("01_Raw"), cloud=RoleRule("05_*")), proj)
+    assert "cloud" in res.missing and any("no folder matches '05_*'" in n for n in res.notes)
