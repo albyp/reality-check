@@ -38,6 +38,7 @@ class Settings:
     tol_xy: float | None = None  # m, per-point dXY tolerance
     report_chip_size: float = 2.0  # m, chip width in the report
     trim: float = 0.10  # average offsets: fraction of dZ values left out, half from each end (Excel TRIMMEAN)
+    spot_max_outside: float = 10.0  # m; spot heights further than this from all data are disregarded
 
 
 @dataclass
@@ -54,6 +55,9 @@ class Session:
     spots_path: str = ""
     spots: list[ControlPoint] = field(default_factory=list)
     spot_observations: list[Observation] = field(default_factory=list)
+    # Spot heights more than settings.spot_max_outside from every dataset's data: id -> distance
+    # to the nearest data in m (None = no data found at all). They are disabled and listed apart.
+    spots_disregarded: dict[str, float | None] = field(default_factory=dict)
 
     def point(self, pid: str) -> ControlPoint:
         return next(p for p in self.points if p.id == pid)
@@ -100,6 +104,7 @@ class Session:
             spots_path=d.get("spots_path", ""),
             spots=points(d.get("spots", [])),
             spot_observations=observations(d.get("spot_observations", [])),
+            spots_disregarded=d.get("spots_disregarded", {}),
         )
 
 
