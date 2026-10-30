@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reality-check"
-version = "0.2.1"
+version = "0.3.0.dev0"
 description = "QA/QC for photogrammetry and LiDAR survey data"
 readme = "README.md"
 license = "GPL-3.0-only"
