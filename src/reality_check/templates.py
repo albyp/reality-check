@@ -1,10 +1,13 @@
 """Project templates: where a survey's files live inside a project folder.
 
 A template gives, for each input (control points, orthomosaic, DEM, point
-cloud), a folder relative to the project root ("" = the root itself) and the
-file patterns to look for there. Resolving a template against a project
-folder finds one file per input, or reports it missing: an orthomosaic or DEM
-may not exist, and a user may check against the point cloud only.
+cloud, spot heights), a folder relative to the project root ("" = the root
+itself) and the file patterns to look for there. The folder may contain
+wildcards for parts that change per project (e.g. 04_Agisoft/Results_*).
+Blank patterns mean the usual files for that input (DEFAULTS). Resolving a
+template against a project folder finds one file per input, or reports it
+missing: an orthomosaic or DEM may not exist, and a user may check against
+the point cloud only.
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ import fnmatch
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from reality_check.detect import _LABEL, _rank, is_own_output
+from reality_check.detect import _LABEL, _SPOT_NAME, _rank, is_own_output
 
 ROLES = ("control", "ortho", "dem", "cloud", "spots")
 OPTIONAL = ("spots",)  # never reported missing: most projects have none
@@ -21,8 +24,8 @@ OPTIONAL = ("spots",)  # never reported missing: most projects have none
 
 @dataclass
 class RoleRule:
-    folder: str = ""  # relative to the project root; "" = the root
-    patterns: list[str] = field(default_factory=list)  # e.g. ["*.tif", "*.tiff"]; may contain sub-folders
+    folder: str = ""  # relative to the project root; "" = the root; may contain wildcards
+    patterns: list[str] = field(default_factory=list)  # e.g. ["*.tif", "*.tiff"]; blank = DEFAULTS
     exclude: list[str] = field(default_factory=list)  # file-name patterns to skip, e.g. ["*dem*"]
     recursive: bool = False  # also search sub-folders of `folder`
 
@@ -60,6 +63,29 @@ _NOT_SPOTS = ["*spot*", "*_sh.*"]
 _TIF = ["*.tif", "*.tiff"]
 _DEM_NAMES = ["*dem*", "*dsm*", "*dtm*"]
 _CLOUD = ["*.laz", "*.las", "*.xyz", "*.pts"]
+_DEMS = ["*dem*.tif", "*dsm*.tif", "*dtm*.tif", "*dem*.tiff", "*dsm*.tiff", "*dtm*.tiff"]
+
+# What a rule with a folder but no patterns looks for: (patterns, exclusions).
+DEFAULTS = {
+    "control": (_CONTROL, _NOT_SPOTS),
+    "ortho": (_TIF, _DEM_NAMES),
+    "dem": (_DEMS, []),
+    "cloud": (_CLOUD, []),
+    "spots": (_SPOTS, []),
+}
+
+
+def effective(role: str, rule: RoleRule) -> tuple[list[str], list[str]]:
+    """The patterns and exclusions a rule searches with (DEFAULTS if it has no patterns)."""
+    if rule.patterns:
+        return rule.patterns, rule.exclude
+    patterns, exclude = DEFAULTS[role]
+    return patterns, rule.exclude or exclude
+
+
+def configured(rule: RoleRule) -> bool:
+    """A rule with neither a folder nor patterns is not used."""
+    return bool(rule.patterns or rule.folder)
 
 
 def builtin_templates() -> list[Template]:
@@ -69,7 +95,7 @@ def builtin_templates() -> list[Template]:
             description="Everything directly inside the project folder.",
             control=RoleRule("", _CONTROL, exclude=_NOT_SPOTS),
             ortho=RoleRule("", _TIF, exclude=_DEM_NAMES),
-            dem=RoleRule("", ["*dem*.tif", "*dsm*.tif", "*dtm*.tif", "*dem*.tiff", "*dsm*.tiff", "*dtm*.tiff"]),
+            dem=RoleRule("", _DEMS),
             cloud=RoleRule("", _CLOUD),
             spots=RoleRule("", _SPOTS),
         ),
@@ -116,18 +142,31 @@ class Resolution:
         return ""
 
 
-def _candidates(root: Path, rule: RoleRule) -> tuple[list[Path], str | None]:
-    folder = root / rule.folder if rule.folder else root
-    if not folder.is_dir():
-        return [], f"folder '{rule.folder}' not found"
+def matching_folders(root: Path, folder: str) -> list[Path]:
+    """The folders a rule's folder names: one, or several when it has wildcards."""
+    folder = folder.replace("\\", "/").strip("/")
+    if not folder:
+        return [root]
+    if any(c in folder for c in "*?["):
+        return sorted(p for p in root.glob(folder) if p.is_dir())
+    return [root / folder] if (root / folder).is_dir() else []
+
+
+def _candidates(root: Path, role: str, rule: RoleRule) -> tuple[list[Path], str | None]:
+    folders = matching_folders(root, rule.folder)
+    if not folders:
+        wild = any(c in rule.folder for c in "*?[")
+        return [], f"no folder matches '{rule.folder}'" if wild else f"folder '{rule.folder}' not found"
+    patterns, exclude = effective(role, rule)
     seen: dict[Path, None] = {}
-    for pattern in rule.patterns:
-        matches = folder.rglob(pattern) if rule.recursive else folder.glob(pattern)
-        for p in matches:
-            name = p.name.lower()
-            if (p.is_file() and not is_own_output(p)
-                    and not any(fnmatch.fnmatch(name, x.lower()) for x in rule.exclude)):
-                seen.setdefault(p, None)
+    for folder in folders:
+        for pattern in patterns:
+            matches = folder.rglob(pattern) if rule.recursive else folder.glob(pattern)
+            for p in matches:
+                name = p.name.lower()
+                if (p.is_file() and not is_own_output(p)
+                        and not any(fnmatch.fnmatch(name, x.lower()) for x in exclude)):
+                    seen.setdefault(p, None)
     return list(seen), None
 
 
@@ -141,19 +180,22 @@ def resolve(template: Template, project: str | Path) -> Resolution:
     # DEM before ortho and control before spot heights, so neither reuses the other's file.
     for role in ("control", "dem", "ortho", "cloud", "spots"):
         rule = template.rule(role)
-        if not rule.patterns:
+        if not configured(rule):
             if role not in OPTIONAL:
                 res.missing.append(role)
             continue
-        found, why = _candidates(root, rule)
+        found, why = _candidates(root, role, rule)
         taken = {res.found.get("dem"), res.found.get("control")}
         found = [p for p in found if str(p) not in taken]
+        if role == "control" and any(not _SPOT_NAME.search(p.stem) for p in found):
+            found = [p for p in found if not _SPOT_NAME.search(p.stem)]  # a spot heights file is never control
         if not found:
             if role in OPTIONAL:
                 continue
             res.missing.append(role)
             if why:
-                res.notes.append(f"{_LABEL[role].capitalize()}: {why}.")
+                label = _LABEL[role]
+                res.notes.append(f"{label[0].upper()}{label[1:]}: {why}.")  # "DEM", not "Dem"
             continue
         found.sort(key=lambda f: _rank(role, f))
         res.found[role] = str(found[0])
