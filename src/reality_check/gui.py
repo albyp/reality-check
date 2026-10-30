@@ -49,13 +49,14 @@ FILE_TYPES = {
     "ortho": [("GeoTIFF", "*.tif *.tiff"), ("All files", "*.*")],
     "dem": [("GeoTIFF", "*.tif *.tiff"), ("All files", "*.*")],
     "cloud": [("Point cloud", "*.las *.laz *.xyz *.txt *.pts"), ("All files", "*.*")],
+    "spots": [("Spot heights", "*.csv *.txt"), ("All files", "*.*")],
     "session": [("RealityCheck session", f"*{SESSION_SUFFIX}"), ("All files", "*.*")],
 }
 
 
 @dataclass
 class State:
-    inputs: dict[str, str] = field(default_factory=lambda: {"control": "", "ortho": "", "dem": "", "cloud": ""})
+    inputs: dict[str, str] = field(default_factory=lambda: dict.fromkeys(ROLES, ""))
     settings: Settings = field(default_factory=Settings)
     session: Session | None = None
     session_path: Path | None = None
@@ -83,7 +84,8 @@ class State:
 S = State()
 log = logging.getLogger("reality_check")
 AUTO = "Auto-detect (no template)"
-ROLE_LABEL = {"control": "Control points", "ortho": "Orthomosaic", "dem": "DEM", "cloud": "Point cloud"}
+ROLE_LABEL = {"control": "Control points", "ortho": "Orthomosaic", "dem": "DEM", "cloud": "Point cloud",
+              "spots": "Spot heights"}
 
 
 def app_settings() -> appsettings.AppSettings:
@@ -99,7 +101,8 @@ def app_settings() -> appsettings.AppSettings:
 
 def _default_settings() -> Settings:
     d = app_settings().defaults
-    return Settings(tol_z=d.tol_z, tol_xy=d.tol_xy, cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size)
+    return Settings(tol_z=d.tol_z, tol_xy=d.tol_xy, cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size,
+                    trim=d.trim)
 
 
 def _template_names() -> list[str]:
@@ -108,7 +111,7 @@ LOG: queue.Queue[str] = queue.Queue()
 INPUT_FIELDS: dict[str, ui.input] = {}  # role -> input element on the current page
 TITLE_FIELD: list[ui.input] = []  # the Project title input on the current page
 INPUT_LABELS = {"control": "Control points (CSV)", "ortho": "Orthomosaic (GeoTIFF)", "dem": "DEM (GeoTIFF)",
-                "cloud": "Point cloud (LAS / LAZ / XYZ)"}
+                "cloud": "Point cloud (LAS / LAZ / XYZ)", "spots": "Spot heights (CSV, optional: Z checks only)"}
 
 # Stop the browser from opening a dropped file in place of the app. In a plain
 # browser tab the drop carries no file path, so tell the user.
@@ -367,7 +370,8 @@ async def load_session(path: str) -> None:
     S.session, S.session_path, S.settings = session, Path(path), session.settings
     ds = {d.kind: d.path for d in session.datasets}
     S.inputs = {"control": session.control_path, "ortho": ds.get(DatasetKind.ORTHO, ""),
-                "dem": ds.get(DatasetKind.DEM, ""), "cloud": ds.get(DatasetKind.CLOUD, "")}
+                "dem": ds.get(DatasetKind.DEM, ""), "cloud": ds.get(DatasetKind.CLOUD, ""),
+                "spots": session.spots_path}
     S.busy = True
     n = ui.notification("Reading point clouds…", spinner=True, timeout=None)
     try:
@@ -392,8 +396,7 @@ def apply_drop(paths: list[str]) -> None:
         if role in INPUT_FIELDS:
             INPUT_FIELDS[role].set_value(path)
     if det.found:
-        short = {"control": "control points", "ortho": "orthomosaic", "dem": "DEM", "cloud": "point cloud"}
-        names = ", ".join(short[r] for r in det.found)
+        names = ", ".join(ROLE_LABEL[r].lower().replace("dem", "DEM") for r in det.found)
         ui.notify(f"Filled {names}.", type="positive")
     for note in det.notes:
         LOG.put(note)
@@ -465,7 +468,8 @@ def setup_panel(panels, t_review) -> None:
                 run_btn.disable()
                 spinner.set_visibility(True)
                 try:
-                    res = await run.io_bound(run_pipeline, S.inputs["control"], datasets, S.settings, None, LOG.put)
+                    res = await run.io_bound(run_pipeline, S.inputs["control"], datasets, S.settings, None, LOG.put,
+                                             S.inputs["spots"] or None)
                 except Exception as e:  # noqa: BLE001
                     LOG.put(f"ERROR: {e}")
                     ui.notify(f"Run failed: {e}", type="negative", multi_line=True)
@@ -976,9 +980,9 @@ def batch_table() -> None:
             ui.icon("create_new_folder", size="lg").classes("text-primary")
             ui.label("Drag project folders here").classes("text-body1 text-weight-medium")
         return
-    with ui.grid(columns="minmax(160px,1.4fr) repeat(4, 90px) 110px minmax(200px,2fr) 150px").classes(
+    with ui.grid(columns="minmax(160px,1.4fr) repeat(5, 70px) 110px minmax(200px,2fr) 150px").classes(
             "w-full items-center gap-x-3 gap-y-1"):
-        for h in ("Project", "Control", "Ortho", "DEM", "Cloud", "Status", "Result", ""):
+        for h in ("Project", "Control", "Ortho", "DEM", "Cloud", "Spots", "Status", "Result", ""):
             ui.label(h).classes("text-caption text-weight-bold text-grey-8")
         for item in items:
             res = item.resolution
@@ -1028,6 +1032,9 @@ def settings_panel() -> None:
                             format="%.2f").classes("w-full")
             chip = ui.select({v: f"{v:g} m" for v in CHIP_SIZES}, value=d.report_chip_size,
                              label="Report chip width").classes("w-full")
+            keep = ui.number("Average offset: trimmed mean (% kept)", value=round((1 - d.trim) * 100, 1), min=50,
+                             max=100, step=5, format="%g").classes("w-full").tooltip(
+                "90 = leave out the highest and lowest 5% of dZ values (Excel TRIMMEAN with 10%). 100 = plain mean.")
             default_tpl = ui.select(_template_names(), value=app_.default_template, label="Default template"
                                     ).classes("w-full")
 
@@ -1036,9 +1043,16 @@ def settings_panel() -> None:
                 d.tol_xy = float(xy.value) / 1000 if xy.value not in (None, "") else None
                 d.cloud_radius = float(rad.value or 0.5)
                 d.report_chip_size = float(chip.value or 2.0)
+                kept = 100.0 if keep.value in (None, "") else min(max(float(keep.value), 50.0), 100.0)
+                d.trim = round(1 - kept / 100, 4)
                 app_.default_template = default_tpl.value or app_.default_template
                 _save_settings()
-                ui.notify("Defaults saved. They apply to new runs.", type="positive")
+                # The trim only changes how the report averages, so it applies to the open session too.
+                S.settings.trim = d.trim
+                if S.session:
+                    S.session.settings = S.settings
+                    report_panel.refresh()
+                ui.notify("Defaults saved. They apply to new runs; the trimmed mean applies now.", type="positive")
 
             ui.button("Save defaults", icon="save", on_click=save_defaults)
         with ui.card().classes("grow"):
