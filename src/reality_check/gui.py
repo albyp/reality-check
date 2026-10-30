@@ -39,7 +39,16 @@ from reality_check.review import (
     set_not_found,
 )
 from reality_check.session import SESSION_SUFFIX, Session, Settings, output_name
-from reality_check.templates import ROLES, Resolution, RoleRule, Template, resolve
+from reality_check.templates import (
+    DEFAULTS,
+    OPTIONAL,
+    ROLES,
+    Resolution,
+    RoleRule,
+    Template,
+    matching_folders,
+    resolve,
+)
 
 CHIP_SIZES = [0.5, 1.0, 2.0, 5.0, 10.0]  # m
 CHIP_PX = 400
@@ -79,6 +88,7 @@ class State:
     batch_options: BatchOptions = field(default_factory=BatchOptions)
     batch_running: bool = False
     edit_template: str = ""  # Settings: template open in the editor
+    example_project: str = ""  # Settings: project folder the template editor browses and tests against
 
 
 S = State()
@@ -1112,21 +1122,61 @@ def template_editor() -> None:
         return
     name = ui.input("Name", value=t.name).classes("w-full").props("dense")
     desc = ui.input("Description", value=t.description).classes("w-full").props("dense")
-    ui.label("Folder: relative to the project folder; blank = the project folder itself. Patterns and "
-             "exclusions: comma-separated, e.g. *_dem.tif, *dsm*.tif").classes("text-caption text-grey-7")
-    fields = {}
-    with ui.grid(columns="120px 1fr 2fr 1.4fr 90px").classes("w-full items-center gap-x-2 gap-y-1"):
-        for h in ("Input", "Folder", "File patterns", "Exclude", "Sub-folders"):
+    with ui.row().classes("w-full items-center no-wrap gap-2"):
+        example = ui.input("Example project folder", value=S.example_project,
+                           placeholder="Pick one of this site's project folders, then browse and test against it",
+                           on_change=lambda e: setattr(S, "example_project", (e.value or "").strip().strip('"'))
+                           ).classes("grow").props("dense clearable")
+
+        async def pick_example():
+            path = await ask_folder("Example project folder", S.example_project)
+            if path:
+                example.set_value(path)
+                await test()
+
+        ui.button(icon="folder_open", on_click=pick_example).props("flat dense").tooltip("Choose folder")
+    ui.label("Folder: relative to the project folder (blank = the project folder itself). Use * for a part that "
+             "changes per project, e.g. 04_Agisoft/Results_*. Patterns and exclusions: comma-separated, e.g. "
+             "*_DSM.tif; leave patterns blank for the usual files (shown in grey).").classes(
+        "text-caption text-grey-7")
+    fields, found_labels = {}, {}
+    with ui.grid(columns="110px 1.3fr 32px 1.6fr 1.2fr 70px 1.4fr").classes("w-full items-center gap-x-2 gap-y-1"):
+        for h in ("Input", "Folder", "", "File patterns", "Exclude", "Sub-folders", "Found in example"):
             ui.label(h).classes("text-caption text-weight-bold text-grey-8")
         for role in ROLES:
             r = t.rule(role)
+            default_patterns, default_exclude = DEFAULTS[role]
             ui.label(ROLE_LABEL[role])
+            folder_inp = ui.input(value=r.folder, placeholder="(project folder)").props("dense")
+
+            async def browse_rule_folder(inp=folder_inp):
+                root = Path(S.example_project) if S.example_project else None
+                if root is None or not root.is_dir():
+                    ui.notify("Choose an example project folder first.", type="warning")
+                    return
+                current = matching_folders(root, inp.value or "")
+                path = await ask_folder("Folder inside the example project", str(current[0] if current else root))
+                if not path:
+                    return
+                try:
+                    rel = Path(path).resolve().relative_to(root.resolve())
+                except ValueError:
+                    ui.notify("That folder is not inside the example project.", type="warning")
+                    return
+                inp.set_value("" if str(rel) == "." else rel.as_posix())
+                if any(ch.isdigit() for ch in rel.as_posix()):
+                    ui.notify("If part of this folder name changes per project (a date or a job number), "
+                              "replace that part with *.", type="info", multi_line=True, timeout=8000)
+
+            ui.button(icon="folder_open", on_click=browse_rule_folder).props("flat dense round size=sm").tooltip(
+                "Pick the folder in the example project")
             fields[role] = (
-                ui.input(value=r.folder, placeholder="(project folder)").props("dense"),
-                ui.input(value=", ".join(r.patterns)).props("dense"),
-                ui.input(value=", ".join(r.exclude)).props("dense"),
+                folder_inp,
+                ui.input(value=", ".join(r.patterns), placeholder=", ".join(default_patterns[:3])).props("dense"),
+                ui.input(value=", ".join(r.exclude), placeholder=", ".join(default_exclude[:3])).props("dense"),
                 ui.checkbox(value=r.recursive),
             )
+            found_labels[role] = ui.label("").classes("text-caption ellipsis")
 
     def build() -> Template:
         def split(v: str) -> list[str]:
@@ -1171,19 +1221,31 @@ def template_editor() -> None:
         ui.notify(f"Deleted template {t.name!r}.")
         template_editor.refresh()
 
-    async def test_on_folder():
-        path = await ask_folder("Test template on a project folder")
-        if not path:
-            return
-        res = resolve(build(), path)
-        lines = [f"{ROLE_LABEL[r]}: {Path(res.found[r]).name if r in res.found else 'not found'}" for r in ROLES]
-        ui.notify("\n".join([Path(path).name] + lines + res.notes), multi_line=True,
-                  type="positive" if res.runnable else "warning", timeout=12000, close_button=True)
+    async def test():
+        """Resolve the template as edited against the example project; show each input's file."""
+        if not S.example_project:
+            path = await ask_folder("Example project folder to test against")
+            if not path:
+                return
+            example.set_value(path)
+        res = await run.io_bound(resolve, build(), S.example_project)
+        for role, label in found_labels.items():
+            if role in res.found:
+                p = Path(res.found[role])
+                label.set_text(p.name)
+                label.tooltip(str(p))
+                label.classes(replace="text-caption ellipsis text-positive")
+            else:
+                label.set_text("not found")
+                label.classes(replace="text-caption ellipsis " + ("text-grey-7" if role in OPTIONAL else "text-negative"))
+        if res.notes:
+            ui.notify("\n".join(res.notes), multi_line=True, timeout=10000, close_button=True)
 
     with ui.row().classes("w-full gap-2 q-mt-sm"):
         ui.button("Save", icon="save", on_click=save)
         ui.button("Duplicate", icon="content_copy", on_click=duplicate).props("outline")
-        ui.button("Test on a folder", icon="rule_folder", on_click=test_on_folder).props("outline")
+        ui.button("Test", icon="rule_folder", on_click=test).props("outline").tooltip(
+            "Show what this template finds in the example project (unsaved changes included)")
         ui.space()
         ui.button("Delete", icon="delete", on_click=delete).props("flat color=negative")
 
