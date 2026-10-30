@@ -102,7 +102,7 @@ def app_settings() -> appsettings.AppSettings:
 def _default_settings() -> Settings:
     d = app_settings().defaults
     return Settings(tol_z=d.tol_z, tol_xy=d.tol_xy, cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size,
-                    trim=d.trim)
+                    trim=d.trim, spot_max_outside=d.spot_max_outside)
 
 
 def _template_names() -> list[str]:
@@ -1035,6 +1035,10 @@ def settings_panel() -> None:
             keep = ui.number("Average offset: trimmed mean (% kept)", value=round((1 - d.trim) * 100, 1), min=50,
                              max=100, step=5, format="%g").classes("w-full").tooltip(
                 "90 = leave out the highest and lowest 5% of dZ values (Excel TRIMMEAN with 10%). 100 = plain mean.")
+            outside = ui.number("Spot heights: disregard if more than (m) outside the data",
+                                value=d.spot_max_outside, min=0, step=1, format="%g").classes("w-full").tooltip(
+                "Spot heights further than this from the DEM and point cloud data are left out and listed "
+                "under the spot heights table. Applies to the next run (after Clear if a session is open).")
             default_tpl = ui.select(_template_names(), value=app_.default_template, label="Default template"
                                     ).classes("w-full")
 
@@ -1045,6 +1049,9 @@ def settings_panel() -> None:
                 d.report_chip_size = float(chip.value or 2.0)
                 kept = 100.0 if keep.value in (None, "") else min(max(float(keep.value), 50.0), 100.0)
                 d.trim = round(1 - kept / 100, 4)
+                d.spot_max_outside = 10.0 if outside.value in (None, "") else max(float(outside.value), 0.0)
+                if S.session is None:  # an open session keeps the limit its list was made with
+                    S.settings.spot_max_outside = d.spot_max_outside
                 app_.default_template = default_tpl.value or app_.default_template
                 _save_settings()
                 # The trim only changes how the report averages, so it applies to the open session too.
