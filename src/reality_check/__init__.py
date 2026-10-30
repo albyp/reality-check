@@ -2,4 +2,4 @@
 
 from reality_check import _env  # noqa: F401  (must run before rasterio is imported)
 
-__version__ = "0.2.1"
+__version__ = "0.3.0.dev0"
