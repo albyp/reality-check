@@ -33,6 +33,12 @@ protected your PC". Click *More info*, then *Run anyway*.
 | Orthomosaic | GeoTIFF |
 | DEM | GeoTIFF |
 | Point cloud | LAS, LAZ, ASCII XYZ |
+| Spot heights (optional) | CSV / TXT, same columns as control points |
+
+Spot heights are surveyed ground levels with no physical mark, on hardstand
+or soft ground. They get a Z check only (no target, no XY, no snapshots) and
+are reported apart from the control points, as supporting evidence when a
+vertical shift or a reprocess is considered.
 
 All datasets in one run are assumed to share the control points' coordinate
 system. RealityCheck warns if the files say otherwise.
@@ -48,16 +54,21 @@ your own PC. `reality-check gui --browser` opens it in a browser tab instead.
    files are; anything it cannot find opens a dialog to choose the file or
    continue without it (the orthomosaic and DEM are optional). With
    *Auto-detect*, dropped files and folders are matched by name (`*_dem.tif` →
-   DEM, other `.tif` → orthomosaic, `.las/.laz` → point cloud, `.csv` →
-   control points). The Browse buttons still work. Set tolerances, then
-   *Run checks*. Dropping a `.rcheck.json` session file opens it.
+   DEM, other `.tif` → orthomosaic, `.las/.laz` → point cloud, `*spot*.csv`
+   or `*_sh.csv` → spot heights, other `.csv` → control points). The Browse
+   buttons still work. Set tolerances, then *Run checks*. Dropping a
+   `.rcheck.json` session file opens it. *Clear* empties everything and
+   releases the files, so they can be updated outside RealityCheck.
 2. **Review**: click a point (or press N / P). Use the chip width slider to
    zoom. Click the target centre on the orthomosaic or point cloud to set the
    measured position. *Not found*, *Reset*, *Enabled*, *Needs touch-up*,
    role and note are per point.
 3. **Report**: preview the report and export PDF, HTML or CSV. The report
    includes a site overview: the orthomosaic with every control point, its
-   horizontal error as an exaggerated ellipse and its dZ as a colour. Exports
+   horizontal error as an exaggerated ellipse and its dZ as a colour; a line
+   per surface saying whether it sits above or below the control (and the
+   spot heights) on average; a Z comparison table (control Z against DEM and
+   cloud Z, point by point); and a compact spot heights table. Exports
    are named after the project title (set on the Setup tab), for example
    `BZ Pit 24 Sept_RealityCheck.pdf`.
 4. **Save session** keeps all review work in a `.rcheck.json` file.
@@ -65,7 +76,7 @@ your own PC. `reality-check gui --browser` opens it in a browser tab instead.
 ### Templates
 
 A template describes a site's folder layout: for control points,
-orthomosaic, DEM and point cloud, a folder relative to the project folder
+orthomosaic, DEM, point cloud and spot heights (optional), a folder relative to the project folder
 (blank = the project folder itself), file patterns and exclusions. Built in:
 
 | Template | Layout |
@@ -79,6 +90,16 @@ folder* shows what a template would pick). Templates and default settings
 live in `settings.json` next to `RealityCheck.exe`, created on first run. If
 that folder cannot be written to (for example under Program Files),
 `%APPDATA%\RealityCheck\settings.json` is used; the Settings tab shows which.
+
+`settings.json` can be edited in a text editor (restart RealityCheck after)
+or on the Settings tab. Its `defaults`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tol_z`, `tol_xy` | `null` | Tolerances in metres, e.g. `0.05`; `null` = none |
+| `cloud_radius` | `0.5` | Cloud Z search radius in metres |
+| `report_chip_size` | `2.0` | Report snapshot width in metres |
+| `trim` | `0.1` | Average offsets: fraction of dZ values left out, half from each end. `0.1` = 90% trimmed mean (Excel `TRIMMEAN(…, 0.1)`); `0` = plain mean |
 
 ### Batch
 
@@ -98,6 +119,13 @@ Review for manual adjustments.
 - **Bias** = mean residual: a systematic offset (for example a datum or geoid
   mix-up shows up as a large bias).
 - **RMSE** combines bias and scatter: RMSE² ≈ bias² + SD².
+- **Above / below**: the summary says, per surface, how far it sits above or
+  below the control (checkpoints if set) and the spot heights on average,
+  with the median and how many points are above and below. The average is a
+  90% trimmed mean by default, marked `*`: the highest and lowest 5% of dZ
+  values are left out first, as Excel `TRIMMEAN` (the number left out rounds
+  down to an even number, so with fewer than 20 points nothing is left out).
+  This keeps a few soft-ground spot heights from moving the average.
 - **GCPs** were used in processing, so their residuals are near zero by
   design. Only **checkpoints** give an independent accuracy figure. A
   Metashape marker export already carries this as its `Enable` column
@@ -121,7 +149,8 @@ reality-check crs list
 
 `run` writes `<title>_RealityCheck.html` and `<title>_RealityCheck.rcheck.json`
 (open it in the GUI to review). The title defaults to the control file name.
-Options: `--title`, `--pdf`, `--csv`, `--radius` (cloud Z search radius,
+Options: `--title`, `--pdf`, `--csv`, `--spots FILE` (spot heights),
+`--trim` (default 0.1), `--radius` (cloud Z search radius,
 default 0.5 m), `--classes 2,11`, `--tol-z`, `--tol-xy`, `--chip-size`,
 `--control-crs NAME` (control points in a local grid from the CRS library).
 
@@ -168,7 +197,10 @@ Done items are listed in [CHANGELOG.md](CHANGELOG.md).
 - [ ] Audit strings: surveyed lines (for example road cross-sections) compared
       against DEM / cloud profiles along the same path.
 - [ ] Check grids: flat-ground point grids (for example 5 x 5) for lidar Z
-      checks that do not depend on RGB alignment.
+      checks that do not depend on RGB alignment. Can load as spot heights
+      today; a grid summary per pad would come later.
+- [ ] Spot heights on the site overview (dots coloured by dZ), and slope at
+      each spot height from the DEM to flag steep ground.
 - [ ] Datum transforms for control points (GDA94 ↔ GDA2020).
 - [ ] 3D models (OBJ and similar) as a dataset: Z check against the mesh
       surface, chips from the textured mesh, template support.
