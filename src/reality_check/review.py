@@ -23,6 +23,7 @@ from reality_check.models import (
 from reality_check.session import Session
 
 XY_KINDS = (DatasetKind.ORTHO, DatasetKind.CLOUD)
+SPOT_PREFIX = "spot:"  # spot height windows share the windows dict under this prefix (ids may clash)
 _KIND_NAME = {DatasetKind.ORTHO: "orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "point cloud"}
 
 
@@ -75,18 +76,23 @@ def recompute_cloud_z(session: Session, windows: dict[str, dict[str, Chunk]]) ->
     """Recompute cloud Z after a class or radius change. windows are unfiltered."""
     classes = set(session.settings.cloud_classes) if session.settings.cloud_classes is not None else None
     cloud_ids = {ds.id for ds in session.datasets if ds.kind is DatasetKind.CLOUD}
-    session.observations = [
-        o for o in session.observations if not (o.dataset_id in cloud_ids and o.check is CheckKind.Z)
-    ]
+    radius = session.settings.cloud_radius
+
+    def cloud_z(ds_id: str, p: ControlPoint, raw: Chunk | None) -> Observation:
+        if raw is None or len(raw) == 0:
+            return Observation(p.id, ds_id, CheckKind.Z, ObsStatus.OUT_OF_EXTENT)
+        return z_from_cloud(ds_id, p, filter_classes(raw, classes), radius)
+
+    def keep(obs: list[Observation]) -> list[Observation]:
+        return [o for o in obs if not (o.dataset_id in cloud_ids and o.check is CheckKind.Z)]
+
+    session.observations = keep(session.observations)
+    session.spot_observations = keep(session.spot_observations)
     for ds_id in cloud_ids:
         for p in session.points:
-            raw = windows[ds_id][p.id]
-            if len(raw) == 0:
-                session.observations.append(Observation(p.id, ds_id, CheckKind.Z, ObsStatus.OUT_OF_EXTENT))
-            else:
-                session.observations.append(
-                    z_from_cloud(ds_id, p, filter_classes(raw, classes), session.settings.cloud_radius)
-                )
+            session.observations.append(cloud_z(ds_id, p, windows[ds_id][p.id]))
+        for p in session.spots:
+            session.spot_observations.append(cloud_z(ds_id, p, windows[ds_id].get(SPOT_PREFIX + p.id)))
 
 
 @dataclass
