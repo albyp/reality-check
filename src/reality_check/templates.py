@@ -15,7 +15,8 @@ from pathlib import Path
 
 from reality_check.detect import _LABEL, _rank, is_own_output
 
-ROLES = ("control", "ortho", "dem", "cloud")
+ROLES = ("control", "ortho", "dem", "cloud", "spots")
+OPTIONAL = ("spots",)  # never reported missing: most projects have none
 
 
 @dataclass
@@ -34,6 +35,7 @@ class Template:
     ortho: RoleRule = field(default_factory=RoleRule)
     dem: RoleRule = field(default_factory=RoleRule)
     cloud: RoleRule = field(default_factory=RoleRule)
+    spots: RoleRule = field(default_factory=RoleRule)  # spot heights (optional)
 
     def rule(self, role: str) -> RoleRule:
         return getattr(self, role)
@@ -53,6 +55,8 @@ class Template:
 
 
 _CONTROL = ["*.csv", "*.txt"]
+_SPOTS = ["*spot*.csv", "*spot*.txt", "*_sh.csv", "*_sh.txt"]
+_NOT_SPOTS = ["*spot*", "*_sh.*"]
 _TIF = ["*.tif", "*.tiff"]
 _DEM_NAMES = ["*dem*", "*dsm*", "*dtm*"]
 _CLOUD = ["*.laz", "*.las", "*.xyz", "*.pts"]
@@ -63,24 +67,27 @@ def builtin_templates() -> list[Template]:
         Template(
             name="Project root",
             description="Everything directly inside the project folder.",
-            control=RoleRule("", _CONTROL),
+            control=RoleRule("", _CONTROL, exclude=_NOT_SPOTS),
             ortho=RoleRule("", _TIF, exclude=_DEM_NAMES),
             dem=RoleRule("", ["*dem*.tif", "*dsm*.tif", "*dtm*.tif", "*dem*.tiff", "*dsm*.tiff", "*dtm*.tiff"]),
             cloud=RoleRule("", _CLOUD),
+            spots=RoleRule("", _SPOTS),
         ),
         Template(
             name="Exports folder",
             description="Control points in the project folder; orthomosaic, DEM (*_dem.tif) and cloud in exports/.",
-            control=RoleRule("", _CONTROL),
+            control=RoleRule("", _CONTROL, exclude=_NOT_SPOTS),
             ortho=RoleRule("exports", _TIF, exclude=_DEM_NAMES),
             dem=RoleRule("exports", ["*_dem.tif", "*_dem.tiff", "*dsm*.tif", "*dtm*.tif"]),
             cloud=RoleRule("exports", _CLOUD),
+            spots=RoleRule("", _SPOTS),
         ),
         Template(
             name="Pix4D (draft - check paths)",
             description="Pix4Dmapper output folders, from memory; confirm before use. Control points in the "
                         "project folder.",
-            control=RoleRule("", _CONTROL),
+            control=RoleRule("", _CONTROL, exclude=_NOT_SPOTS),
+            spots=RoleRule("", _SPOTS),
             ortho=RoleRule("3_dsm_ortho/2_mosaic", ["*_transparent_mosaic_group1.tif", "*mosaic*.tif"]),
             dem=RoleRule("3_dsm_ortho/1_dsm", ["*_dsm.tif", "*dsm*.tif"]),
             cloud=RoleRule("2_densification/point_cloud", ["*densified_point_cloud.laz",
@@ -128,19 +135,22 @@ def resolve(template: Template, project: str | Path) -> Resolution:
     root = Path(project)
     res = Resolution(root)
     if not root.is_dir():
-        res.missing = list(ROLES)
+        res.missing = [r for r in ROLES if r not in OPTIONAL]
         res.notes.append(f"{root} is not a folder.")
         return res
-    for role in ("control", "dem", "ortho", "cloud"):  # DEM before ortho, so the ortho never reuses the DEM file
+    # DEM before ortho and control before spot heights, so neither reuses the other's file.
+    for role in ("control", "dem", "ortho", "cloud", "spots"):
         rule = template.rule(role)
         if not rule.patterns:
-            res.missing.append(role)
+            if role not in OPTIONAL:
+                res.missing.append(role)
             continue
         found, why = _candidates(root, rule)
-        if role == "ortho":
-            dem_path = res.found.get("dem")
-            found = [p for p in found if str(p) != dem_path]
+        taken = {res.found.get("dem"), res.found.get("control")}
+        found = [p for p in found if str(p) not in taken]
         if not found:
+            if role in OPTIONAL:
+                continue
             res.missing.append(role)
             if why:
                 res.notes.append(f"{_LABEL[role].capitalize()}: {why}.")
