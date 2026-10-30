@@ -32,6 +32,7 @@ class Defaults:
     tol_xy: float | None = None  # m
     cloud_radius: float = 0.5  # m
     report_chip_size: float = 2.0  # m
+    trim: float = 0.10  # average offsets: fraction of dZ values left out (0.10 = 90% trimmed mean)
 
 
 @dataclass
@@ -150,5 +151,16 @@ def load(path: Path | None = None) -> AppSettings:
         return s
     known = Defaults.__dataclass_fields__
     defaults = Defaults(**{k: v for k, v in d.get("defaults", {}).items() if k in known})
-    templates = [Template.from_dict(t) for t in d.get("templates", [])] or builtin_templates()
+    templates = [_upgrade(t) for t in d.get("templates", [])] or builtin_templates()
     return AppSettings(path, defaults, d.get("default_template", templates[0].name), templates)
+
+
+def _upgrade(raw: dict) -> Template:
+    """A template saved before spot heights existed: a copy of a built-in gets the
+    built-in's spot heights rule, and its control rule skips spot height files."""
+    t = Template.from_dict(raw)
+    builtin = next((b for b in builtin_templates() if b.name == t.name), None)
+    if "spots" not in raw and builtin is not None:
+        t.spots = builtin.spots
+        t.control.exclude = list(dict.fromkeys(t.control.exclude + builtin.control.exclude))
+    return t
