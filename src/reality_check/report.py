@@ -62,6 +62,7 @@ td.n, th.n { text-align:right; }
 .tag.blue { color:var(--accent); border-color:#a9d3d8; background:#eef8f9; }
 ul.issues { margin:0; padding-left:18px; }
 ul.offsets { margin:10px 0 0; padding-left:18px; }
+ul.disregarded { margin:2px 0 0; padding-left:18px; }
 tr.foot td { border-top:2px solid var(--line); border-bottom:none; }
 .compact table { width:auto; min-width:50%; }
 .compact td, .compact th { padding:1px 10px; font-size:11px; }
@@ -167,7 +168,9 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
     w(f"<span>Control points</span><b>{_e(Path(session.control_path).name)} ({len(session.points)} points, "
       f"{sum(p.enabled for p in session.points)} enabled)</b>")
     if session.spots_path:
-        w(f"<span>Spot heights</span><b>{_e(Path(session.spots_path).name)} ({len(session.spots)} points, "
+        gone = len(session.spots_disregarded)
+        w(f"<span>Spot heights</span><b>{_e(Path(session.spots_path).name)} ({len(session.spots)} points"
+          f"{f', {gone} disregarded (more than {s.spot_max_outside:g} m outside the data)' if gone else ''}; "
           "Z only)</b>")
     for d in session.datasets:
         w(f"<span>{KIND_LABEL[d.kind]}</span><b>{_e(Path(d.path).name)} <span class='muted'>· {_e(_crs_text(d))}</span></b>")
@@ -344,6 +347,8 @@ def _spot_table(session: Session, z_ds, offsets) -> tuple[str, list[str], str]:
         f"<th class='n'>dZ {KIND_LABEL[d.kind].lower()}</th>" for d in z_ds)
     rows = []
     for p in session.spots:
+        if not p.enabled:  # disregarded: listed after the table
+            continue
         cells = [f"<td>{_e(p.id)}</td><td class='n'>{p.z:.3f}</td>"]
         for d in z_ds:
             o = obs.get((p.id, d.id))
@@ -360,7 +365,7 @@ def _spot_table(session: Session, z_ds, offsets) -> tuple[str, list[str], str]:
                  ("RMSE", lambda o, st: _mm(st.rmse, False)),
                  ("n (above / below)", lambda o, st: f"{o.n} ({o.above} / {o.below})")]
     stats = {d.id: Stats.of(o.z - p.z for p in session.spots
-                            if (o := obs.get((p.id, d.id))) is not None and o.status is ObsStatus.OK)
+                            if p.enabled and (o := obs.get((p.id, d.id))) is not None and o.status is ObsStatus.OK)
              for d in z_ds}
     for i, (label, cell) in enumerate(foot_rows):
         tds = [f"<td colspan=2>{label}</td>"]
@@ -372,6 +377,15 @@ def _spot_table(session: Session, z_ds, offsets) -> tuple[str, list[str], str]:
              "ground, so they carry surface roughness and are kept apart from the control point statistics. Use them "
              "as supporting evidence when a vertical shift or a reprocess is considered. dZ in mm = surface minus "
              f"spot height; ▲ surface higher, ▼ lower.{' * Trimmed mean, see the Summary.' if star else ''}</p>")
+    if session.spots_disregarded:
+        by_id = {p.id: p for p in session.spots}
+        items = "".join(
+            f"<li>{_e(pid)} <span class='muted'>E {by_id[pid].x:.3f} · N {by_id[pid].y:.3f} · Z {by_id[pid].z:.3f}"
+            f" · {'no data nearby' if d is None else f'nearest data {d:.0f} m'}</span></li>"
+            for pid, d in session.spots_disregarded.items() if pid in by_id)
+        after += (f"<p class='note'><b>Disregarded:</b> {len(session.spots_disregarded)} spot heights are more than "
+                  f"{session.settings.spot_max_outside:g} m outside the DEM and point cloud, so they are left out of "
+                  f"the table and the averages:</p><ul class='disregarded note'>{items}</ul>")
     return head, rows, after
 
 
