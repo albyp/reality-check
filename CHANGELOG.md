@@ -3,7 +3,7 @@
 All notable changes to RealityCheck. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.3.0] - in development
+## [0.3.0] - 2026-10-31
 
 ### Added
 - Project templates: for each input, a folder relative to the project
