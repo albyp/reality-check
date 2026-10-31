@@ -2,6 +2,8 @@
 
     reality-check gui
     reality-check run --control gcp.csv --ortho ortho.tif --dem dem.tif --cloud cloud.laz --out results
+    reality-check batch --template "Exports folder" D:/Surveys/pit_a D:/Surveys/pit_b --pdf
+    reality-check templates
     reality-check classes cloud.laz
     reality-check crs list | export FILE | import FILE
 """
@@ -20,7 +22,7 @@ from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
 from reality_check.report import write_html, write_pdf
 from reality_check.session import Settings, output_name
-from reality_check.stats import summarise
+from reality_check.stats import summarise, z_offsets
 
 
 def _ints(s: str) -> list[int]:
@@ -37,7 +39,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--ortho", action="append", default=[], help="orthomosaic GeoTIFF (repeatable)")
     r.add_argument("--dem", action="append", default=[], help="DEM GeoTIFF (repeatable)")
     r.add_argument("--cloud", action="append", default=[], help="point cloud LAS/LAZ/XYZ (repeatable)")
+    r.add_argument("--spots", default=None, help="spot heights CSV (Z checks only, reported separately)")
     r.add_argument("--out", required=True, type=Path, help="output folder")
+    r.add_argument("--trim", type=float, default=0.10,
+                   help="average offsets: fraction of dZ values left out, half from each end (default 0.10 = "
+                        "90%% trimmed mean; 0 = plain mean)")
+    r.add_argument("--spot-max-outside", type=float, default=10.0,
+                   help="disregard spot heights more than this many metres outside the data (default 10)")
     r.add_argument("--title", default="", help="project title (default: control file name)")
     r.add_argument("--radius", type=float, default=0.5, help="cloud Z search radius in metres (default 0.5)")
     r.add_argument("--classes", type=_ints, default=None, help="cloud classes to use, e.g. 2,11 (default all)")
@@ -52,6 +60,18 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--browser", action="store_true", help="use a browser tab instead of the desktop window")
     g.add_argument("--port", type=int, default=8765, help="browser mode port (default 8765)")
     g.add_argument("--no-browser", action="store_true", help="browser mode: do not open a tab")
+
+    b = sub.add_parser("batch", help="run many project folders with one template")
+    b.add_argument("projects", nargs="+", type=Path, help="project folders")
+    b.add_argument("--template", default=None, help="template name (default: the default in settings.json)")
+    b.add_argument("--out", default="", help="write all outputs here (default: inside each project folder)")
+    b.add_argument("--pdf", action="store_true", help="write the PDF report")
+    b.add_argument("--html", action="store_true", help="write the HTML report")
+    b.add_argument("--csv", action="store_true", help="write residuals and summary CSVs")
+    b.add_argument("--tol-z", type=float, default=None, help="Z tolerance in metres (default: settings.json)")
+    b.add_argument("--tol-xy", type=float, default=None, help="XY tolerance in metres (default: settings.json)")
+
+    t = sub.add_parser("templates", help="list project templates and where settings.json is")
 
     c = sub.add_parser("classes", help="list classes in a point cloud")
     c.add_argument("cloud")
@@ -74,10 +94,11 @@ def cmd_run(a) -> int:
         return 2
     settings = Settings(
         project_title=a.title, cloud_radius=a.radius, cloud_classes=a.classes, control_crs=a.control_crs,
-        tol_z=a.tol_z, tol_xy=a.tol_xy, report_chip_size=a.chip_size,
+        tol_z=a.tol_z, tol_xy=a.tol_xy, report_chip_size=a.chip_size, trim=a.trim,
+        spot_max_outside=a.spot_max_outside,
     )
     a.out.mkdir(parents=True, exist_ok=True)
-    result = run(a.control, datasets, settings)
+    result = run(a.control, datasets, settings, spots_path=a.spots)
     s = result.session
     s.save(a.out / output_name(s, "session"))
     renderer = ChipRenderer(s, result.windows)
@@ -100,6 +121,9 @@ def cmd_run(a) -> int:
     bad = [o for o in s.observations if o.status.value != "ok"]
     for o in bad:
         print(f"  {o.point_id} in {o.dataset_id}: {o.status.value}")
+    for o in z_offsets(s.spots, s.spot_observations, settings.trim, spots=True):
+        print(f"{o.dataset_id:38} spot heights: offset {o.mean:+.3f}{'*' if o.trim else ''} "
+              f"median {o.median:+.3f} n {o.n} ({o.above} above, {o.below} below)")
     print(f"\nResults written to {a.out}")
     return 0
 
@@ -132,6 +156,50 @@ def cmd_crs(a) -> int:
     return 0
 
 
+def _settings_from_defaults(app, tol_z=None, tol_xy=None) -> Settings:
+    d = app.defaults
+    return Settings(cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size, trim=d.trim,
+                    spot_max_outside=d.spot_max_outside,
+                    tol_z=d.tol_z if tol_z is None else tol_z, tol_xy=d.tol_xy if tol_xy is None else tol_xy)
+
+
+def cmd_batch(a) -> int:
+    from reality_check import appsettings
+    from reality_check.batch import BatchOptions, run_batch
+
+    app = appsettings.load()
+    name = a.template or app.default_template
+    template = app.template(name)
+    if template is None:
+        print(f"error: no template called {name!r}. Available: {', '.join(t.name for t in app.templates)}",
+              file=sys.stderr)
+        return 2
+    options = BatchOptions(pdf=a.pdf, html=a.html or not (a.pdf or a.csv), csv=a.csv, out_dir=a.out)
+    print(f"Template: {template.name}")
+    items = run_batch(template, a.projects, _settings_from_defaults(app, a.tol_z, a.tol_xy), options)
+    print()
+    for it in items:
+        print(f"{it.status.upper():8} {it.project.name}" + (f"  ({it.message})" if it.message else ""))
+        for h in it.headline:
+            print(f"         {h}")
+    return 0 if all(it.status != "failed" for it in items) else 1
+
+
+def cmd_templates(a) -> int:
+    from reality_check import appsettings
+
+    app = appsettings.load()
+    print(f"Settings: {app.path}")
+    for t in app.templates:
+        star = "*" if t.name == app.default_template else " "
+        print(f"{star} {t.name}: {t.description}")
+        for role in ("control", "ortho", "dem", "cloud"):
+            r = t.rule(role)
+            where = r.folder or "(project folder)"
+            print(f"      {role:8} {where}/{' | '.join(r.patterns)}" + (f"  not {', '.join(r.exclude)}" if r.exclude else ""))
+    return 0
+
+
 def cmd_gui(a) -> int:
     from reality_check.gui import start, start_desktop
 
@@ -148,8 +216,10 @@ def main(argv: list[str] | None = None) -> int:
     if double_clicked:  # started from Explorer: open the GUI
         argv = ["gui"]
     a = build_parser().parse_args(argv)
+    commands = {"run": cmd_run, "batch": cmd_batch, "templates": cmd_templates, "classes": cmd_classes,
+                "crs": cmd_crs, "gui": cmd_gui}
     try:
-        return {"run": cmd_run, "classes": cmd_classes, "crs": cmd_crs, "gui": cmd_gui}[a.cmd](a)
+        return commands[a.cmd](a)
     except Exception:
         if not double_clicked or getattr(sys, "frozen", False):  # the frozen exe shows its own error box
             raise

@@ -1,7 +1,9 @@
 """Review GUI (NiceGUI, served on localhost and opened in the browser).
 
 Workflow: Setup (inputs, run) -> Review (per point: adjust, enable, flag)
--> Report (live preview, export PDF / HTML / CSV).
+-> Report (live preview, export PDF / HTML / CSV). Batch runs many project
+folders with a template; Settings holds defaults and templates
+(settings.json next to the exe).
 
 Single user, local only: the app state is module level and survives a page
 reload.
@@ -9,14 +11,17 @@ reload.
 
 from __future__ import annotations
 
+import gc
 import logging
+import os
 import queue
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from nicegui import app, run, ui
 
-from reality_check import __version__, windialogs
+from reality_check import __version__, appsettings, windialogs
+from reality_check.batch import BatchOptions, BatchResult, plan, run_one
 from reality_check.cloud import CLASS_NAMES, Chunk, is_classified
 from reality_check.detect import detect
 from reality_check.export import write_residuals, write_summary
@@ -34,6 +39,16 @@ from reality_check.review import (
     set_not_found,
 )
 from reality_check.session import SESSION_SUFFIX, Session, Settings, output_name
+from reality_check.templates import (
+    DEFAULTS,
+    OPTIONAL,
+    ROLES,
+    Resolution,
+    RoleRule,
+    Template,
+    matching_folders,
+    resolve,
+)
 
 CHIP_SIZES = [0.5, 1.0, 2.0, 5.0, 10.0]  # m
 CHIP_PX = 400
@@ -43,13 +58,14 @@ FILE_TYPES = {
     "ortho": [("GeoTIFF", "*.tif *.tiff"), ("All files", "*.*")],
     "dem": [("GeoTIFF", "*.tif *.tiff"), ("All files", "*.*")],
     "cloud": [("Point cloud", "*.las *.laz *.xyz *.txt *.pts"), ("All files", "*.*")],
+    "spots": [("Spot heights", "*.csv *.txt"), ("All files", "*.*")],
     "session": [("RealityCheck session", f"*{SESSION_SUFFIX}"), ("All files", "*.*")],
 }
 
 
 @dataclass
 class State:
-    inputs: dict[str, str] = field(default_factory=lambda: {"control": "", "ortho": "", "dem": "", "cloud": ""})
+    inputs: dict[str, str] = field(default_factory=lambda: dict.fromkeys(ROLES, ""))
     settings: Settings = field(default_factory=Settings)
     session: Session | None = None
     session_path: Path | None = None
@@ -64,14 +80,66 @@ class State:
     desktop: bool = False  # running in the pywebview window (drag and drop gives full paths)
     fallback_reason: str = ""  # why the desktop window could not start (browser mode instead)
     window: object | None = None  # the pywebview window, for native file dialogs
+    app: appsettings.AppSettings | None = None  # settings.json: defaults and templates
+    template_name: str = ""  # Setup: template for a project folder ("" = the default template)
+    project_dir: str = ""  # Setup: project folder loaded through a template
+    batch_template: str = ""
+    batch_items: list[BatchResult] = field(default_factory=list)
+    batch_options: BatchOptions = field(default_factory=BatchOptions)
+    batch_running: bool = False
+    edit_template: str = ""  # Settings: template open in the editor
+    example_project: str = ""  # Settings: project folder the template editor browses and tests against
 
 
 S = State()
 log = logging.getLogger("reality_check")
+AUTO = "Auto-detect (no template)"
+ROLE_LABEL = {"control": "Control points", "ortho": "Orthomosaic", "dem": "DEM", "cloud": "Point cloud",
+              "spots": "Spot heights"}
+
+
+def app_settings() -> appsettings.AppSettings:
+    """settings.json, loaded once. The first load also sets the run defaults."""
+    if S.app is None:
+        S.app = appsettings.load()
+        if S.session is None:
+            S.settings = _default_settings()
+        S.template_name = S.template_name or S.app.default_template
+        S.batch_template = S.batch_template or S.app.default_template
+    return S.app
+
+
+def _default_settings() -> Settings:
+    d = app_settings().defaults
+    return Settings(tol_z=d.tol_z, tol_xy=d.tol_xy, cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size,
+                    trim=d.trim, spot_max_outside=d.spot_max_outside)
+
+
+def _template_names() -> list[str]:
+    return [t.name for t in app_settings().templates]
+
+
+TEMPLATE_SELECTS: dict[str, ui.select] = {}  # "setup" / "batch" / "default" -> template dropdown on the page
+
+
+def _refresh_template_selects() -> None:
+    """After templates are added, renamed or deleted, update every template dropdown."""
+    names = _template_names()
+    for key, sel in TEMPLATE_SELECTS.items():
+        options = [AUTO] + names if key == "setup" else names
+        current = {"setup": S.template_name, "batch": S.batch_template}.get(key, sel.value)
+        if current not in options:  # renamed or deleted
+            current = AUTO if key == "setup" else app_settings().default_template
+            if key == "setup":
+                S.template_name = current
+            elif key == "batch":
+                S.batch_template = current
+        sel.set_options(options, value=current)
 LOG: queue.Queue[str] = queue.Queue()
 INPUT_FIELDS: dict[str, ui.input] = {}  # role -> input element on the current page
+TITLE_FIELD: list[ui.input] = []  # the Project title input on the current page
 INPUT_LABELS = {"control": "Control points (CSV)", "ortho": "Orthomosaic (GeoTIFF)", "dem": "DEM (GeoTIFF)",
-                "cloud": "Point cloud (LAS / LAZ / XYZ)"}
+                "cloud": "Point cloud (LAS / LAZ / XYZ)", "spots": "Spot heights (CSV, optional: Z checks only)"}
 
 # Stop the browser from opening a dropped file in place of the app. In a plain
 # browser tab the drop carries no file path, so tell the user.
@@ -99,6 +167,8 @@ def _tk_dialog(kind: str, title: str, types, initial: str = "", directory: str =
     root.withdraw()
     root.attributes("-topmost", True)
     try:
+        if kind == "folder":
+            return filedialog.askdirectory(parent=root, title=title, initialdir=directory or None)
         if kind == "open":
             return filedialog.askopenfilename(parent=root, title=title, filetypes=types, initialdir=directory or None)
         return filedialog.asksaveasfilename(parent=root, title=title, filetypes=types, initialfile=initial,
@@ -116,9 +186,10 @@ def _webview_types(types) -> tuple[str, ...]:
 def _webview_dialog(kind: str, types, initial: str = "", directory: str = "") -> str:
     import webview
 
-    dialog = webview.FileDialog.OPEN if kind == "open" else webview.FileDialog.SAVE
+    dialog = {"open": webview.FileDialog.OPEN, "save": webview.FileDialog.SAVE,
+              "folder": webview.FileDialog.FOLDER}[kind]
     result = S.window.create_file_dialog(dialog, directory=directory, save_filename=initial,
-                                         file_types=_webview_types(types))
+                                         file_types=_webview_types(types) if kind != "folder" else ())
     if not result:
         return ""
     path = result if isinstance(result, str) else result[0]
@@ -130,6 +201,8 @@ def _webview_dialog(kind: str, types, initial: str = "", directory: str = "") ->
 
 
 def _win_dialog(kind: str, title: str, types, initial: str = "", directory: str = "") -> str:
+    if kind == "folder":
+        return windialogs.pick_folder(title, directory)
     if kind == "open":
         return windialogs.open_file(title, types, directory)
     return windialogs.save_file(title, types, initial, directory)
@@ -156,6 +229,10 @@ async def ask_open(title: str, types, directory: str = "") -> str:
 
 async def ask_save(title: str, types, initial: str, directory: str = "") -> str:
     return await _dialog("save", title, types, initial, directory)
+
+
+async def ask_folder(title: str, directory: str = "") -> str:
+    return await _dialog("folder", title, [("Folder", "*")], directory=directory)
 
 
 def _project_dir() -> str:
@@ -187,6 +264,37 @@ def _mark_dirty() -> None:
     S.dirty = True
 
 
+def clear_all() -> None:
+    """Forget the inputs and results, and close every file RealityCheck holds open."""
+    if S.renderer is not None:
+        S.renderer.close()
+    S.renderer = None
+    S.inputs = {role: "" for role in ROLES}
+    S.settings = _default_settings()
+    S.session = S.session_path = S.selected = None
+    S.windows, S.warnings = {}, []
+    S.project_dir, S.dirty = "", False
+    gc.collect()  # drop the point cloud samples now, not later
+    log.info("Cleared inputs and results")
+
+
+async def confirm_clear() -> None:
+    if S.busy:
+        ui.notify("Wait for the run to finish first.", type="warning")
+        return
+    if S.dirty:
+        with ui.dialog() as dialog, ui.card():
+            ui.label("Clear without saving?").classes("text-h6")
+            ui.label("The review work in this session has not been saved.").classes("text-body2")
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
+                ui.button("Clear", on_click=lambda: dialog.submit(True)).props("color=negative")
+        if not await dialog:
+            return
+    clear_all()
+    ui.navigate.reload()
+
+
 # ---------- page ----------
 
 @ui.page("/")
@@ -207,6 +315,7 @@ def index() -> None:
         ui.button("Open session", icon="folder_open", on_click=lambda: open_session()).props("flat")
         ui.button("Save session", icon="save", on_click=lambda: save_session()).props("flat")
 
+    app_settings()
     if S.fallback_reason:
         with ui.card().classes("w-full q-pa-sm").style("background:#fff8e8; border:1px solid #f0d49a"):
             ui.label("RealityCheck could not open its own window on this computer, so it is running in your "
@@ -219,6 +328,8 @@ def index() -> None:
         t_setup = ui.tab("Setup", icon="tune")
         t_review = ui.tab("Review", icon="fact_check")
         t_report = ui.tab("Report", icon="description")
+        t_batch = ui.tab("Batch", icon="dynamic_feed")
+        t_settings = ui.tab("Settings", icon="settings")
 
     with ui.tab_panels(tabs, value=t_setup).classes("w-full") as panels:
         with ui.tab_panel(t_setup):
@@ -227,18 +338,29 @@ def index() -> None:
             review_panel()
         with ui.tab_panel(t_report):
             report_panel()
+        with ui.tab_panel(t_batch):
+            batch_panel()
+        with ui.tab_panel(t_settings):
+            settings_panel()
 
     if S.session is not None:
         panels.set_value(t_review)
 
     async def on_drop(e):
         paths = e.args.get("paths", [])
+        if panels.value in (t_batch, "Batch"):
+            add_batch_projects(paths)
+            return
         sessions = [p for p in paths if p.lower().endswith(SESSION_SUFFIX)]
         if sessions:
             await load_session(sessions[0])
             return
         panels.set_value(t_setup)
-        apply_drop(paths)
+        folders = [p for p in paths if Path(p).is_dir()]
+        if len(paths) == 1 and folders and S.template_name != AUTO:
+            await load_project_folder(folders[0])
+        else:
+            apply_drop(paths)
 
     ui.on("rc_drop", on_drop)
     ui.on("rc_drop_browser", lambda: ui.notify(
@@ -276,7 +398,8 @@ async def load_session(path: str) -> None:
     S.session, S.session_path, S.settings = session, Path(path), session.settings
     ds = {d.kind: d.path for d in session.datasets}
     S.inputs = {"control": session.control_path, "ortho": ds.get(DatasetKind.ORTHO, ""),
-                "dem": ds.get(DatasetKind.DEM, ""), "cloud": ds.get(DatasetKind.CLOUD, "")}
+                "dem": ds.get(DatasetKind.DEM, ""), "cloud": ds.get(DatasetKind.CLOUD, ""),
+                "spots": session.spots_path}
     S.busy = True
     n = ui.notification("Reading point clouds…", spinner=True, timeout=None)
     try:
@@ -301,8 +424,7 @@ def apply_drop(paths: list[str]) -> None:
         if role in INPUT_FIELDS:
             INPUT_FIELDS[role].set_value(path)
     if det.found:
-        short = {"control": "control points", "ortho": "orthomosaic", "dem": "DEM", "cloud": "point cloud"}
-        names = ", ".join(short[r] for r in det.found)
+        names = ", ".join(ROLE_LABEL[r].lower().replace("dem", "DEM") for r in det.found)
         ui.notify(f"Filled {names}.", type="positive")
     for note in det.notes:
         LOG.put(note)
@@ -323,10 +445,32 @@ def setup_panel(panels, t_review) -> None:
                     S.session.settings = S.settings
                     _mark_dirty()
 
-            ui.input("Project title", value=S.settings.project_title,
+            title_inp = ui.input("Project title", value=S.settings.project_title,
                      placeholder="Defaults to the control file name",
                      on_change=set_title).classes("w-full").props("dense").tooltip(
                 "Used in the report heading and in export names, e.g. <title>_RealityCheck.pdf")
+            TITLE_FIELD[:] = [title_inp]
+            with ui.row().classes("w-full items-center no-wrap gap-2"):
+                setup_tpl = ui.select([AUTO] + _template_names(),
+                                      value=S.template_name if S.template_name in _template_names() else AUTO,
+                                      label="Template", on_change=lambda e: setattr(S, "template_name", e.value)
+                                      ).classes("w-64").props("dense")
+                TEMPLATE_SELECTS["setup"] = setup_tpl
+                folder_inp = ui.input("Project folder", value=S.project_dir).classes("grow").props("dense clearable")
+
+                async def browse_folder():
+                    path = await ask_folder("Project folder", S.project_dir or _project_dir())
+                    if path:
+                        folder_inp.set_value(path)
+                        await load_project_folder(path)
+
+                async def load_folder():
+                    path = (folder_inp.value or "").strip().strip('"')
+                    if path:
+                        await load_project_folder(path)
+
+                ui.button(icon="folder_open", on_click=browse_folder).props("flat dense").tooltip("Choose folder")
+                ui.button("Load", on_click=load_folder).props("dense outline")
             drop_zone()
             for key, label in INPUT_LABELS.items():
                 file_row(key, label)
@@ -354,7 +498,8 @@ def setup_panel(panels, t_review) -> None:
                 run_btn.disable()
                 spinner.set_visibility(True)
                 try:
-                    res = await run.io_bound(run_pipeline, S.inputs["control"], datasets, S.settings, None, LOG.put)
+                    res = await run.io_bound(run_pipeline, S.inputs["control"], datasets, S.settings, None, LOG.put,
+                                             S.inputs["spots"] or None)
                 except Exception as e:  # noqa: BLE001
                     LOG.put(f"ERROR: {e}")
                     ui.notify(f"Run failed: {e}", type="negative", multi_line=True)
@@ -375,6 +520,9 @@ def setup_panel(panels, t_review) -> None:
 
             with ui.row().classes("items-center gap-3 q-mt-sm"):
                 run_btn = ui.button("Run checks", icon="play_arrow", on_click=do_run)
+                ui.button("Clear", icon="restart_alt", on_click=confirm_clear).props("outline").tooltip(
+                    "Start fresh: empty the inputs, drop the results and release the files so they can be "
+                    "updated outside RealityCheck")
                 spinner = ui.spinner(size="md")
                 spinner.set_visibility(False)
 
@@ -398,10 +546,94 @@ def _set_tol(attr: str, value) -> None:
         _mark_dirty()
 
 
+async def load_project_folder(folder: str) -> None:
+    """Fill the inputs from a project folder with the selected template."""
+    if S.template_name == AUTO:
+        apply_drop([folder])
+        return
+    template = app_settings().template(S.template_name)
+    if template is None:
+        ui.notify(f"Template {S.template_name!r} not found.", type="negative")
+        return
+    res = resolve(template, folder)
+    S.project_dir = folder
+    for note in res.notes:
+        LOG.put(note)
+    if res.missing:
+        await missing_files_dialog(res)
+        return
+    _apply_resolution(res.found, Path(folder).name)
+    ui.notify(f"Loaded {Path(folder).name} with template {template.name!r}.", type="positive")
+
+
+def _apply_resolution(found: dict[str, str], title: str) -> None:
+    for role in ROLES:
+        S.inputs[role] = found.get(role, "")
+        if role in INPUT_FIELDS:
+            INPUT_FIELDS[role].set_value(S.inputs[role])
+    if not S.settings.project_title and title:
+        S.settings.project_title = title
+        if TITLE_FIELD:
+            TITLE_FIELD[0].set_value(title)
+
+
+async def missing_files_dialog(res: Resolution) -> None:
+    """Some inputs were not found: let the user pick them, or go on without (not control points)."""
+    chosen = dict(res.found)
+    with ui.dialog().props("persistent") as dialog, ui.card().classes("min-w-[640px]"):
+        ui.label(f"Files for {res.project.name}").classes("text-h6")
+        ui.label("Some files were not found with this template. Choose them, or continue without them. "
+                 "The orthomosaic and DEM are optional; control points and one dataset are needed.").classes(
+            "text-body2 text-grey-8")
+
+        @ui.refreshable
+        def rows() -> None:
+            for role in ROLES:
+                with ui.row().classes("w-full items-center no-wrap gap-2"):
+                    ui.label(ROLE_LABEL[role]).classes("w-32 text-weight-medium")
+                    if role in chosen:
+                        ui.icon("check_circle", color="positive")
+                        ui.label(Path(chosen[role]).name).classes("grow ellipsis").tooltip(chosen[role])
+                    else:
+                        ui.icon("warning", color="warning" if role != "control" else "negative")
+                        ui.label("Not found" + (" (required)" if role == "control" else " - skipped")).classes(
+                            "grow text-grey-7")
+
+                    async def pick(r=role):
+                        path = await ask_open(ROLE_LABEL[r], FILE_TYPES[r], str(res.project))
+                        if path:
+                            chosen[r] = path
+                            rows.refresh()
+
+                    def skip(r=role):
+                        chosen.pop(r, None)
+                        rows.refresh()
+
+                    ui.button("Browse", on_click=pick).props("dense flat no-caps")
+                    if role in chosen:
+                        ui.button("Skip", on_click=skip).props("dense flat no-caps color=grey")
+            ok = "control" in chosen and any(r in chosen for r in ("ortho", "dem", "cloud"))
+            with ui.row().classes("w-full justify-end gap-2 q-mt-md"):
+                ui.button("Cancel", on_click=lambda: dialog.submit(None)).props("flat")
+                btn = ui.button("Use these files", on_click=lambda: dialog.submit(dict(chosen)))
+                if not ok:
+                    btn.disable()
+
+        rows()
+        for note in res.notes:
+            ui.label(note).classes("text-caption text-grey-7")
+    result = await dialog
+    dialog.clear()
+    if result:
+        _apply_resolution(result, res.project.name)
+        ui.notify(f"Loaded {res.project.name}.", type="positive")
+
+
 def drop_zone() -> None:
     if S.desktop:
         text = "Drag files or a whole project folder here"
-        sub = "Files are matched automatically: *_dem.tif → DEM, other .tif → orthomosaic, .las/.laz → point cloud, .csv → control"
+        sub = ("A folder is read with the selected template. With Auto-detect: *_dem.tif → DEM, other .tif → "
+               "orthomosaic, .las/.laz → point cloud, .csv → control")
     else:
         text = "Drag and drop works in the RealityCheck desktop window"
         sub = "In a browser tab, use the Browse buttons or paste a path (Shift + right-click a file → Copy as path)"
@@ -671,6 +903,374 @@ def chip_card(cp, ds, size: float) -> None:
 
                 ui.button("Not found", on_click=not_found).props("flat dense no-caps color=negative")
                 ui.button("Reset", on_click=reset).props("flat dense no-caps")
+
+
+# ---------- Batch ----------
+
+def add_batch_projects(paths: list[str]) -> None:
+    folders = [str(Path(p)) for p in paths if Path(p).is_dir()]
+    skipped = len(paths) - len(folders)
+    known = {str(i.project) for i in S.batch_items}
+    new = [f for f in folders if f not in known]
+    template = app_settings().template(S.batch_template)
+    if template is not None:
+        S.batch_items += plan(template, new)
+    if skipped:
+        ui.notify(f"{skipped} item(s) ignored: batch takes project folders.", type="warning")
+    if new:
+        ui.notify(f"Added {len(new)} project folder(s).", type="positive")
+    batch_table.refresh()
+
+
+def _replan() -> None:
+    template = app_settings().template(S.batch_template)
+    if template is not None:
+        S.batch_items = plan(template, [i.project for i in S.batch_items])
+    batch_table.refresh()
+
+
+def batch_panel() -> None:
+    with ui.row().classes("w-full items-center gap-3"):
+        TEMPLATE_SELECTS["batch"] = ui.select(
+            _template_names(), value=S.batch_template if S.batch_template in _template_names() else None,
+            label="Template", on_change=lambda e: (setattr(S, "batch_template", e.value), _replan())
+        ).classes("w-72").props("dense")
+
+        async def add_folder():
+            path = await ask_folder("Add project folder")
+            if path:
+                add_batch_projects([path])
+
+        ui.button("Add folder", icon="create_new_folder", on_click=add_folder).props("outline")
+        ui.button("Clear", icon="clear_all", on_click=lambda: (S.batch_items.clear(), batch_table.refresh())
+                  ).props("flat")
+        ui.space()
+        o = S.batch_options
+        ui.checkbox("PDF", value=o.pdf, on_change=lambda e: setattr(o, "pdf", e.value))
+        ui.checkbox("HTML", value=o.html, on_change=lambda e: setattr(o, "html", e.value))
+        ui.checkbox("CSV", value=o.csv, on_change=lambda e: setattr(o, "csv", e.value))
+    with ui.row().classes("w-full items-center gap-3"):
+        out_inp = ui.input("Output folder", value=S.batch_options.out_dir,
+                           placeholder="Blank = inside each project folder",
+                           on_change=lambda e: setattr(S.batch_options, "out_dir", (e.value or "").strip().strip('"'))
+                           ).classes("grow").props("dense clearable")
+
+        async def pick_out():
+            path = await ask_folder("Output folder")
+            if path:
+                out_inp.set_value(path)
+
+        ui.button(icon="folder_open", on_click=pick_out).props("flat dense").tooltip("Choose output folder")
+        run_btn = ui.button("Run batch", icon="play_arrow")
+
+    ui.label("Drag project folders onto this tab, or use Add folder. Each project runs with the Setup tab's "
+             "tolerances and cloud settings; the project folder name is the report title. Missing orthomosaic "
+             "or DEM files are skipped; a project without control points is not run.").classes(
+        "text-caption text-grey-7")
+    batch_table()
+
+    async def run_all():
+        if S.batch_running:
+            return
+        runnable = [i for i in S.batch_items if i.resolution.runnable]
+        if not runnable:
+            ui.notify("No runnable projects. Add project folders first.", type="warning")
+            return
+        if not (S.batch_options.pdf or S.batch_options.html or S.batch_options.csv):
+            ui.notify("Choose at least one output: PDF, HTML or CSV.", type="warning")
+            return
+        _replan()
+        S.batch_running = True
+        run_btn.props("loading")
+        try:
+            for n, item in enumerate(S.batch_items, start=1):
+                LOG.put(f"[batch {n}/{len(S.batch_items)}] {item.project.name}")
+                item.status = "running"
+                batch_table.refresh()
+                try:
+                    await run.io_bound(run_one, item, S.settings, S.batch_options, LOG.put)
+                except Exception as e:  # noqa: BLE001 - keep going with the next project
+                    log.exception("Batch project %s failed", item.project)
+                    item.status, item.message = "failed", f"{type(e).__name__}: {e}"
+                batch_table.refresh()
+        finally:
+            S.batch_running = False
+            run_btn.props(remove="loading")
+        done = sum(i.status == "done" for i in S.batch_items)
+        ui.notify(f"Batch finished: {done} of {len(S.batch_items)} projects done.", type="positive")
+
+    run_btn.on_click(run_all)
+
+
+@ui.refreshable
+def batch_table() -> None:
+    items = S.batch_items
+    if not items:
+        with ui.column().classes("w-full items-center gap-0 q-pa-xl rounded-borders").style(
+                "border: 2px dashed #9bbfc4; background: #f4fafa"):
+            ui.icon("create_new_folder", size="lg").classes("text-primary")
+            ui.label("Drag project folders here").classes("text-body1 text-weight-medium")
+        return
+    with ui.grid(columns="minmax(160px,1.4fr) repeat(5, 70px) 110px minmax(200px,2fr) 150px").classes(
+            "w-full items-center gap-x-3 gap-y-1"):
+        for h in ("Project", "Control", "Ortho", "DEM", "Cloud", "Spots", "Status", "Result", ""):
+            ui.label(h).classes("text-caption text-weight-bold text-grey-8")
+        for item in items:
+            res = item.resolution
+            ui.label(item.project.name).classes("ellipsis").tooltip(str(item.project))
+            for role in ROLES:
+                if role in res.found:
+                    ui.icon("check_circle", color="positive").tooltip(res.found[role])
+                else:
+                    ui.icon("cancel" if role == "control" else "remove_circle_outline",
+                            color="negative" if role == "control" else "grey").tooltip("Not found")
+            colour = {"done": "positive", "failed": "negative", "skipped": "warning", "running": "primary"}.get(
+                item.status, "grey")
+            status = item.status if res.runnable or item.status != "pending" else "cannot run"
+            ui.badge(status, color=colour if res.runnable or item.status != "pending" else "negative")
+            text = "; ".join(item.headline) or item.message or res.problem() or "; ".join(res.notes)
+            if item.headline and item.message:
+                text += f" ({item.message})"
+            ui.label(text).classes("text-caption" + (" text-negative" if "FAIL" in text else ""))
+            with ui.row().classes("gap-1 no-wrap"):
+                report = next((o for o in item.outputs if o.lower().endswith((".pdf", ".html"))), None)
+                if report:
+                    ui.button(icon="description", on_click=lambda r=report: os.startfile(r)).props(
+                        "flat dense round").tooltip("Open report")
+                if item.session_path:
+                    ui.button(icon="fact_check", on_click=lambda s=item.session_path: load_session(s)).props(
+                        "flat dense round").tooltip("Open in Review")
+
+                def remove(it=item):
+                    S.batch_items.remove(it)
+                    batch_table.refresh()
+
+                ui.button(icon="close", on_click=remove).props("flat dense round color=grey").tooltip("Remove")
+
+
+# ---------- Settings ----------
+
+def settings_panel() -> None:
+    app_ = app_settings()
+    ui.label(f"Settings file: {app_.path}").classes("text-caption text-grey-7")
+    with ui.row().classes("w-full gap-6 items-start no-wrap"):
+        with ui.card().classes("w-80"):
+            ui.label("Defaults for new runs").classes("text-subtitle1 text-weight-medium")
+            d = app_.defaults
+            z = ui.number("Z tolerance (mm)", value=d.tol_z * 1000 if d.tol_z else None).classes("w-full")
+            xy = ui.number("XY tolerance (mm)", value=d.tol_xy * 1000 if d.tol_xy else None).classes("w-full")
+            rad = ui.number("Cloud Z radius (m)", value=d.cloud_radius, min=0.05, max=5, step=0.05,
+                            format="%.2f").classes("w-full")
+            chip = ui.select({v: f"{v:g} m" for v in CHIP_SIZES}, value=d.report_chip_size,
+                             label="Report chip width").classes("w-full")
+            keep = ui.number("Average offset: trimmed mean (% kept)", value=round((1 - d.trim) * 100, 1), min=50,
+                             max=100, step=5, format="%g").classes("w-full").tooltip(
+                "90 = leave out the highest and lowest 5% of dZ values (Excel TRIMMEAN with 10%). 100 = plain mean.")
+            outside = ui.number("Spot heights: disregard if more than (m) outside the data",
+                                value=d.spot_max_outside, min=0, step=1, format="%g").classes("w-full").tooltip(
+                "Spot heights further than this from the DEM and point cloud data are left out and listed "
+                "under the spot heights table. Applies to the next run (after Clear if a session is open).")
+            default_tpl = ui.select(_template_names(), value=app_.default_template, label="Default template"
+                                    ).classes("w-full")
+            TEMPLATE_SELECTS["default"] = default_tpl
+
+            def save_defaults():
+                d.tol_z = float(z.value) / 1000 if z.value not in (None, "") else None
+                d.tol_xy = float(xy.value) / 1000 if xy.value not in (None, "") else None
+                d.cloud_radius = float(rad.value or 0.5)
+                d.report_chip_size = float(chip.value or 2.0)
+                kept = 100.0 if keep.value in (None, "") else min(max(float(keep.value), 50.0), 100.0)
+                d.trim = round(1 - kept / 100, 4)
+                d.spot_max_outside = 10.0 if outside.value in (None, "") else max(float(outside.value), 0.0)
+                if S.session is None:  # an open session keeps the limit its list was made with
+                    S.settings.spot_max_outside = d.spot_max_outside
+                app_.default_template = default_tpl.value or app_.default_template
+                _save_settings()
+                # The trim only changes how the report averages, so it applies to the open session too.
+                S.settings.trim = d.trim
+                if S.session:
+                    S.session.settings = S.settings
+                    report_panel.refresh()
+                ui.notify("Defaults saved. They apply to new runs; the trimmed mean applies now.", type="positive")
+
+            ui.button("Save defaults", icon="save", on_click=save_defaults)
+        with ui.card().classes("grow"):
+            template_editor()
+
+
+def _save_settings() -> None:
+    try:
+        app_settings().save()
+    except OSError as e:
+        log.exception("Could not save settings")
+        ui.notify(f"Could not save {app_settings().path}: {e}", type="negative", multi_line=True)
+    _refresh_template_selects()
+
+
+@ui.refreshable
+def template_editor() -> None:
+    app_ = app_settings()
+    names = _template_names()
+    if S.edit_template not in names:
+        S.edit_template = names[0] if names else ""
+    with ui.row().classes("w-full items-center gap-2"):
+        ui.label("Templates").classes("text-subtitle1 text-weight-medium")
+        ui.select(names, value=S.edit_template or None, label="Edit template",
+                  on_change=lambda e: (setattr(S, "edit_template", e.value), template_editor.refresh())
+                  ).classes("w-72").props("dense")
+        ui.space()
+
+        def new_template():
+            base, n = "New template", 1
+            name = base
+            while app_.template(name):
+                n += 1
+                name = f"{base} {n}"
+            app_.upsert(Template(name, "Describe where this site's files are.", control=RoleRule("", ["*.csv"])))
+            S.edit_template = name
+            _save_settings()
+            template_editor.refresh()
+
+        def restore():
+            added = app_.restore_builtins()
+            _save_settings()
+            ui.notify(f"Restored: {', '.join(added)}" if added else "All built-in templates are present.")
+            template_editor.refresh()
+
+        ui.button("New", icon="add", on_click=new_template).props("flat dense")
+        ui.button("Restore built-ins", icon="restore", on_click=restore).props("flat dense")
+
+    t = app_.template(S.edit_template)
+    if t is None:
+        return
+    name = ui.input("Name", value=t.name).classes("w-full").props("dense")
+    desc = ui.input("Description", value=t.description).classes("w-full").props("dense")
+    with ui.row().classes("w-full items-center no-wrap gap-2"):
+        example = ui.input("Example project folder", value=S.example_project,
+                           placeholder="Pick one of this site's project folders, then browse and test against it",
+                           on_change=lambda e: setattr(S, "example_project", (e.value or "").strip().strip('"'))
+                           ).classes("grow").props("dense clearable")
+
+        async def pick_example():
+            path = await ask_folder("Example project folder", S.example_project)
+            if path:
+                example.set_value(path)
+                await test()
+
+        ui.button(icon="folder_open", on_click=pick_example).props("flat dense").tooltip("Choose folder")
+    ui.label("Folder: relative to the project folder (blank = the project folder itself). Use * for a part that "
+             "changes per project, e.g. 04_Agisoft/Results_*. Patterns and exclusions: comma-separated, e.g. "
+             "*_DSM.tif; leave patterns blank for the usual files (shown in grey).").classes(
+        "text-caption text-grey-7")
+    fields, found_labels = {}, {}
+    with ui.grid(columns="110px 1.3fr 32px 1.6fr 1.2fr 70px 1.4fr").classes("w-full items-center gap-x-2 gap-y-1"):
+        for h in ("Input", "Folder", "", "File patterns", "Exclude", "Sub-folders", "Found in example"):
+            ui.label(h).classes("text-caption text-weight-bold text-grey-8")
+        for role in ROLES:
+            r = t.rule(role)
+            default_patterns, default_exclude = DEFAULTS[role]
+            ui.label(ROLE_LABEL[role])
+            folder_inp = ui.input(value=r.folder, placeholder="(project folder)").props("dense")
+
+            async def browse_rule_folder(inp=folder_inp):
+                root = Path(S.example_project) if S.example_project else None
+                if root is None or not root.is_dir():
+                    ui.notify("Choose an example project folder first.", type="warning")
+                    return
+                current = matching_folders(root, inp.value or "")
+                path = await ask_folder("Folder inside the example project", str(current[0] if current else root))
+                if not path:
+                    return
+                try:
+                    rel = Path(path).resolve().relative_to(root.resolve())
+                except ValueError:
+                    ui.notify("That folder is not inside the example project.", type="warning")
+                    return
+                inp.set_value("" if str(rel) == "." else rel.as_posix())
+                if any(ch.isdigit() for ch in rel.as_posix()):
+                    ui.notify("If part of this folder name changes per project (a date or a job number), "
+                              "replace that part with *.", type="info", multi_line=True, timeout=8000)
+
+            ui.button(icon="folder_open", on_click=browse_rule_folder).props("flat dense round size=sm").tooltip(
+                "Pick the folder in the example project")
+            fields[role] = (
+                folder_inp,
+                ui.input(value=", ".join(r.patterns), placeholder=", ".join(default_patterns[:3])).props("dense"),
+                ui.input(value=", ".join(r.exclude), placeholder=", ".join(default_exclude[:3])).props("dense"),
+                ui.checkbox(value=r.recursive),
+            )
+            found_labels[role] = ui.label("").classes("text-caption ellipsis")
+
+    def build() -> Template:
+        def split(v: str) -> list[str]:
+            return [x.strip() for x in (v or "").split(",") if x.strip()]
+
+        rules = {role: RoleRule(folder=(f[0].value or "").strip().strip("/\\"), patterns=split(f[1].value),
+                                exclude=split(f[2].value), recursive=bool(f[3].value))
+                 for role, f in fields.items()}
+        return Template((name.value or "").strip() or t.name, (desc.value or "").strip(), **rules)
+
+    def save():
+        new = build()
+        try:
+            app_.upsert(new, old_name=t.name)
+        except ValueError as e:
+            ui.notify(str(e), type="negative")
+            return
+        S.edit_template = new.name
+        _save_settings()
+        ui.notify(f"Saved template {new.name!r}.", type="positive")
+        template_editor.refresh()
+
+    def duplicate():
+        new = build()
+        base = f"{new.name} copy"
+        name_, n = base, 1
+        while app_.template(name_):
+            n += 1
+            name_ = f"{base} {n}"
+        new.name = name_
+        app_.upsert(new)
+        S.edit_template = new.name
+        _save_settings()
+        template_editor.refresh()
+
+    def delete():
+        if len(app_.templates) <= 1:
+            ui.notify("Keep at least one template.", type="warning")
+            return
+        app_.remove(t.name)
+        _save_settings()
+        ui.notify(f"Deleted template {t.name!r}.")
+        template_editor.refresh()
+
+    async def test():
+        """Resolve the template as edited against the example project; show each input's file."""
+        if not S.example_project:
+            path = await ask_folder("Example project folder to test against")
+            if not path:
+                return
+            example.set_value(path)
+        res = await run.io_bound(resolve, build(), S.example_project)
+        for role, label in found_labels.items():
+            if role in res.found:
+                p = Path(res.found[role])
+                label.set_text(p.name)
+                label.tooltip(str(p))
+                label.classes(replace="text-caption ellipsis text-positive")
+            else:
+                label.set_text("not found")
+                label.classes(replace="text-caption ellipsis " + ("text-grey-7" if role in OPTIONAL else "text-negative"))
+        if res.notes:
+            ui.notify("\n".join(res.notes), multi_line=True, timeout=10000, close_button=True)
+
+    with ui.row().classes("w-full gap-2 q-mt-sm"):
+        ui.button("Save", icon="save", on_click=save)
+        ui.button("Duplicate", icon="content_copy", on_click=duplicate).props("outline")
+        ui.button("Test", icon="rule_folder", on_click=test).props("outline").tooltip(
+            "Show what this template finds in the example project (unsaved changes included)")
+        ui.space()
+        ui.button("Delete", icon="delete", on_click=delete).props("flat color=negative")
 
 
 # ---------- Report ----------

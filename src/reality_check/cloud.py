@@ -171,25 +171,53 @@ def _parse_xyz(lines: list[str], delimiter: str | None, cols: XYZColumns) -> Chu
 
 
 @dataclass
+class Coverage:
+    """Where the cloud has points: the occupied cells of a grid of size res."""
+
+    res: float
+    cells: np.ndarray  # (n, 2) int64 cell indices (floor(x / res), floor(y / res))
+
+    def distance(self, x: float, y: float) -> float | None:
+        """Plan distance from (x, y) to the nearest point, to within one cell
+        (0 inside an occupied cell). None if the cloud has no points."""
+        if len(self.cells) == 0:
+            return None
+        ix, iy = np.floor(x / self.res), np.floor(y / self.res)
+        # Gap in whole cells between (x, y)'s cell and each occupied cell, per axis.
+        gx = np.maximum(np.abs(self.cells[:, 0] - ix) - 1, 0)
+        gy = np.maximum(np.abs(self.cells[:, 1] - iy) - 1, 0)
+        return float(np.sqrt((gx**2 + gy**2).min()) * self.res)
+
+
+COVERAGE_RES = 1.0  # m
+_KEY_OFFSET = 1 << 30  # keeps cell indices positive (coordinates up to about ±1e9 m) when packed in 32 bits
+
+
+@dataclass
 class SampleResult:
     windows: dict[str, Chunk]  # point id -> points inside its window
     class_counts: dict[int, int] = field(default_factory=dict)  # whole cloud
     total_points: int = 0
+    coverage: Coverage | None = None
 
 
 def sample_windows(
     path: str,
     centres: dict[str, tuple[float, float]],
-    half: float,
+    half: float | dict[str, float],
     chunk_size: int = 5_000_000,
     xyz_columns: XYZColumns | None = None,
+    coverage: bool = False,
 ) -> SampleResult:
-    """Stream the cloud once. Keep points within +/- half of each centre."""
+    """Stream the cloud once. Keep points within +/- half of each centre
+    (half: one size for all, or a size per centre id). coverage=True also
+    records where the cloud has points (COVERAGE_RES grid)."""
     ids = list(centres)
     cx = np.array([centres[i][0] for i in ids])
     cy = np.array([centres[i][1] for i in ids])
+    hs = np.array([half[i] for i in ids]) if isinstance(half, dict) else np.full(len(ids), half)
     if ids:
-        gx0, gx1, gy0, gy1 = cx.min() - half, cx.max() + half, cy.min() - half, cy.max() + half
+        gx0, gx1, gy0, gy1 = (cx - hs).min(), (cx + hs).max(), (cy - hs).min(), (cy + hs).max()
     else:  # class counts only
         gx0 = gy0 = np.inf
         gx1 = gy1 = -np.inf
@@ -197,8 +225,13 @@ def sample_windows(
     parts: dict[str, list[Chunk]] = {i: [] for i in ids}
     class_counts: dict[int, int] = {}
     total = 0
+    cells: list[np.ndarray] = []
     for ch in iter_chunks(path, chunk_size, xyz_columns):
         total += len(ch)
+        if coverage and len(ch):
+            ix = np.floor(ch.x / COVERAGE_RES).astype(np.int64) + _KEY_OFFSET
+            iy = np.floor(ch.y / COVERAGE_RES).astype(np.int64) + _KEY_OFFSET
+            cells.append(np.unique((ix << 32) | iy))  # one int64 key per cell: unique is fast in 1D
         if ch.classification is not None:
             u, n = np.unique(ch.classification, return_counts=True)
             for k, v in zip(u.tolist(), n.tolist()):
@@ -208,10 +241,14 @@ def sample_windows(
             continue
         sub = ch.subset(near)
         for i, pid in enumerate(ids):
-            m = (np.abs(sub.x - cx[i]) <= half) & (np.abs(sub.y - cy[i]) <= half)
+            m = (np.abs(sub.x - cx[i]) <= hs[i]) & (np.abs(sub.y - cy[i]) <= hs[i])
             if m.any():
                 parts[pid].append(sub.subset(m))
-    return SampleResult({pid: Chunk.concat(p) for pid, p in parts.items()}, class_counts, total)
+    cov = None
+    if coverage:
+        keys = np.unique(np.concatenate(cells)) if cells else np.empty(0, np.int64)
+        cov = Coverage(COVERAGE_RES, np.stack([(keys >> 32) - _KEY_OFFSET, (keys & 0xFFFFFFFF) - _KEY_OFFSET], axis=1))
+    return SampleResult({pid: Chunk.concat(p) for pid, p in parts.items()}, class_counts, total, cov)
 
 
 def is_classified(class_counts: dict[int, int]) -> bool:

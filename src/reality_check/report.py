@@ -18,11 +18,12 @@ from reality_check.models import CheckKind, DatasetKind, ObsSource, ObsStatus, R
 from reality_check.raster import raster_info
 from reality_check.render import ChipRenderer, to_data_url
 from reality_check.review import point_results
-from reality_check.overview import render_overview
+from reality_check.overview import PX_PER_MM, render_overview
 from reality_check.session import Session, project_title
-from reality_check.stats import summarise
+from reality_check.stats import LEVEL, Stats, summarise, trim_note, z_offsets
 
 KIND_LABEL = {DatasetKind.ORTHO: "Orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "Point cloud"}
+OFFSET_LABEL = {DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "point cloud"}  # in a sentence
 COMPONENT_LABEL = {"dz": "dZ", "dx": "dX", "dy": "dY", "dxy": "dXY"}
 STATUS_LABEL = {
     ObsStatus.OK: "OK",
@@ -60,6 +61,12 @@ td.n, th.n { text-align:right; }
 .tag.amber { color:var(--warn); border-color:#f0d49a; background:#fff8e8; }
 .tag.blue { color:var(--accent); border-color:#a9d3d8; background:#eef8f9; }
 ul.issues { margin:0; padding-left:18px; }
+ul.offsets { margin:10px 0 0; padding-left:18px; }
+ul.disregarded { margin:2px 0 0; padding-left:18px; }
+tr.foot td { border-top:2px solid var(--line); border-bottom:none; }
+.compact table { width:auto; min-width:50%; }
+.compact td, .compact th { padding:1px 10px; font-size:11px; }
+tr.sub td { border-bottom:none; padding-top:1px; padding-bottom:1px; color:var(--muted); }
 .point { border:1px solid var(--line); border-radius:6px; padding:12px; margin:0 0 14px; break-inside:avoid; }
 .point.disabled { opacity:.6; }
 .point header { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; margin-bottom:8px; }
@@ -89,7 +96,7 @@ h2 .cont { font-weight:400; font-size:13px; color:var(--muted); }
   .screen-only { display:none; }
   .print-only { display:block; }
   .page-break { break-before:page; }
-  figure.overview img { width:auto; max-width:100%; max-height:235mm; margin:0 auto; }
+  figure.overview img { width:var(--w, auto); max-width:100%; margin:0 auto; }
 }
 """
 
@@ -101,9 +108,11 @@ def _e(s) -> str:
 # Rows of a report table that fit on one printed A4 page with the heading and
 # header row (13 px text, 12 mm margins). Longer tables are split at this size.
 PRINT_ROWS_PER_PAGE = 30
+COMPACT_ROWS_PER_PAGE = 50  # .compact tables: 11 px text, tight rows
 
 
-def _table_block(title: str, head: str, rows: list[str], after: str = "", rows_per_page: int = PRINT_ROWS_PER_PAGE) -> str:
+def _table_block(title: str, head: str, rows: list[str], after: str = "", rows_per_page: int = PRINT_ROWS_PER_PAGE,
+                 css_class: str = "") -> str:
     """A heading with its table, kept together in print.
 
     head is the header row's cells; rows are complete <tr> elements. A table
@@ -114,7 +123,7 @@ def _table_block(title: str, head: str, rows: list[str], after: str = "", rows_p
     thead = f"<thead><tr>{head}</tr></thead>"
 
     def block(heading: str, body: list[str], cls: str, tail: str) -> str:
-        return (f"<section class='block {cls}'><h2>{heading}</h2><div class='table-wrap'><table>{thead}"
+        return (f"<section class='block {cls} {css_class}'><h2>{heading}</h2><div class='table-wrap'><table>{thead}"
                 f"<tbody>{''.join(body)}</tbody></table></div>{tail}</section>")
 
     if len(rows) <= rows_per_page:
@@ -158,6 +167,11 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
     w(f"<span>Generated</span><b>{datetime.now():%d %b %Y %H:%M}</b>")
     w(f"<span>Control points</span><b>{_e(Path(session.control_path).name)} ({len(session.points)} points, "
       f"{sum(p.enabled for p in session.points)} enabled)</b>")
+    if session.spots_path:
+        gone = len(session.spots_disregarded)
+        w(f"<span>Spot heights</span><b>{_e(Path(session.spots_path).name)} ({len(session.spots)} points"
+          f"{f', {gone} disregarded (more than {s.spot_max_outside:g} m outside the data)' if gone else ''}; "
+          "Z only)</b>")
     for d in session.datasets:
         w(f"<span>{KIND_LABEL[d.kind]}</span><b>{_e(Path(d.path).name)} <span class='muted'>· {_e(_crs_text(d))}</span></b>")
     classes = s.cloud_classes
@@ -191,12 +205,31 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
             w(f"<div class='card'><div class='k'>{KIND_LABEL[d.kind]} {label} RMSE · {group} (n={st.n})</div>"
               f"<div class='v'>{_mm(st.rmse, False)} <small>mm</small> {verdict}</div>"
               f"<div class='k'>{bias}SD {_mm(st.sd, False)} mm</div></div>")
-    w("</div></section>")
+    w("</div>")
+    offsets = z_offsets(session.points, session.observations, s.trim)
+    spot_offsets = z_offsets(session.spots, session.spot_observations, s.trim, spots=True)
+    if offsets or spot_offsets:
+        w("<ul class='offsets'>" + "".join(
+            f"<li>{_e(o.sentence(OFFSET_LABEL[ds_by_id[o.dataset_id].kind]))}</li>"
+            for o in offsets + spot_offsets) + "</ul>")
+        note = trim_note(offsets + spot_offsets)
+        if note:
+            w(f"<p class='note'>{_e(note)}</p>")
+    w("</section>")
 
     overview = render_overview(session)
-    w(f"<section class='block'><h2>Site overview</h2><figure class='overview'><img src='{to_data_url(overview, 'JPEG')}' alt='Site overview with control points'>"
-      "<figcaption>Ellipses show horizontal error (semi-axes dX and dY, exaggerated by the stated factor); "
-      "the line points in the error direction. Colour shows dZ.</figcaption></figure></section>")
+    caption = ("Ellipses show horizontal error (semi-axes dX and dY, exaggerated by the stated factor); "
+               "the line points in the error direction. Colour shows dZ.")
+    if overview.layout.strips > 1:
+        caption += (" The site is long and narrow, so it is cut into numbered strips at one scale, "
+                    "in the order stated under the map.")
+    for i, sheet in enumerate(overview.sheets):
+        heading = "Site overview" + (" <span class='cont'>(continued…)</span>" if i else "")
+        # Printed at the size it was drawn, so text keeps its size on paper.
+        w(f"<section class='block{' page-break' if i else ''}'><h2>{heading}</h2><figure class='overview'>"
+          f"<img style='--w:{sheet.width / PX_PER_MM:.1f}mm' src='{to_data_url(sheet, 'JPEG')}' "
+          f"alt='Site overview with control points'>"
+          f"{f'<figcaption>{caption}</figcaption>' if i == len(overview.sheets) - 1 else ''}</figure></section>")
 
     stat_rows = []
     for r in summary:
@@ -242,6 +275,12 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
         point_rows.append("<tr>" + "".join(cells) + "</tr>")
     w(_table_block("Control points", head, point_rows))
 
+    if z_ds:
+        w(_table_block("Z comparison", *_z_table(session, results, z_ds, offsets)))
+    if z_ds and session.spots:
+        w(_table_block("Spot heights", *_spot_table(session, z_ds, spot_offsets), rows_per_page=COMPACT_ROWS_PER_PAGE,
+                       css_class="compact"))
+
     # Point pages
     w("<h2 class='page-break'>Point details</h2>")
     size = s.report_chip_size
@@ -275,6 +314,92 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
 
     w(f"<p class='note'>RealityCheck {__version__} · QA/QC for photogrammetry and LiDAR</p></main>")
     return "".join(out)
+
+
+def _z_table(session: Session, results, z_ds, offsets) -> tuple[str, list[str], str]:
+    """Control Z against each surface's Z, point by point, with the mean offset at the foot."""
+    tol = session.settings.tol_z
+    head = "<th>Point</th><th>Role</th><th class='n'>Control Z</th>"
+    head += "".join(f"<th class='n'>{KIND_LABEL[d.kind]} Z</th><th class='n'>dZ</th><th></th>" for d in z_ds)
+    rows = []
+    for pr in results:
+        cp = pr.point
+        cells = [f"<td>{_e(cp.id)}</td><td>{_role_text(cp.role)}</td><td class='n'>{cp.z:.3f}</td>"]
+        for d in z_ds:
+            o = pr.status.get((d.id, CheckKind.Z))
+            dz = pr.dz.get(d.id)
+            if dz is None:
+                cells.append(f"<td class='n muted'>{_status_short(pr, d.id, CheckKind.Z)}</td><td></td><td></td>")
+                continue
+            cells.append(f"<td class='n'>{o.z:.3f}</td><td class='n {_tol_class(dz, tol)}'>{_mm(dz)}</td>"
+                         f"<td class='muted'>{_above_below(dz)}</td>")
+        rows.append(f"<tr{' class=muted' if not cp.enabled else ''}>" + "".join(cells) + "</tr>")
+    by_ds = {o.dataset_id: o for o in offsets}
+    foot = [f"<td colspan=3><b>Mean offset{'*' if session.settings.trim > 0 else ''}</b></td>"]
+    for d in z_ds:
+        o = by_ds.get(d.id)
+        foot.append("<td></td><td></td><td></td>" if o is None else
+                    f"<td></td><td class='n'><b>{_mm(o.mean)}</b></td><td class='muted'>{_above_below(o.mean)}</td>")
+    rows.append("<tr class='foot'>" + "".join(foot) + "</tr>")
+    after = ("<p class='note'>Z values in metres, dZ in mm. dZ = surface minus control: positive means the surface "
+             "is higher than the surveyed point. The mean offset uses checkpoints if any are set, otherwise all "
+             "enabled points; disabled points are greyed and excluded."
+             + (" * Trimmed mean, see the Summary." if session.settings.trim > 0 else "") + "</p>")
+    return head, rows, after
+
+
+def _spot_table(session: Session, z_ds, offsets) -> tuple[str, list[str], str]:
+    """Spot heights: compact, dZ only. Supporting evidence for a shift or a reprocess."""
+    star = "*" if session.settings.trim > 0 else ""
+    obs = {(o.point_id, o.dataset_id): o for o in session.spot_observations if o.check is CheckKind.Z}
+    head = "<th>Spot</th><th class='n'>Z</th>" + "".join(
+        f"<th class='n'>dZ {KIND_LABEL[d.kind].lower()}</th>" for d in z_ds)
+    rows = []
+    for p in session.spots:
+        if not p.enabled:  # disregarded: listed after the table
+            continue
+        cells = [f"<td>{_e(p.id)}</td><td class='n'>{p.z:.3f}</td>"]
+        for d in z_ds:
+            o = obs.get((p.id, d.id))
+            if o is None or o.status is not ObsStatus.OK:
+                cells.append(f"<td class='n muted'>{STATUS_LABEL[o.status] if o else '–'}</td>")
+            else:
+                dz = o.z - p.z
+                cells.append(f"<td class='n'>{_mm(dz)} <span class='muted'>{_above_below(dz).split()[0]}</span></td>")
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    by_ds = {o.dataset_id: o for o in offsets}
+    foot_rows = [(f"Mean offset{star}", lambda o, st: f"<b>{_mm(o.mean)}</b> {_above_below(o.mean).split()[0]}"),
+                 ("Median", lambda o, st: _mm(o.median)),
+                 ("SD", lambda o, st: _mm(st.sd, False)),
+                 ("RMSE", lambda o, st: _mm(st.rmse, False)),
+                 ("n (above / below)", lambda o, st: f"{o.n} ({o.above} / {o.below})")]
+    stats = {d.id: Stats.of(o.z - p.z for p in session.spots
+                            if p.enabled and (o := obs.get((p.id, d.id))) is not None and o.status is ObsStatus.OK)
+             for d in z_ds}
+    for i, (label, cell) in enumerate(foot_rows):
+        tds = [f"<td colspan=2>{label}</td>"]
+        for d in z_ds:
+            o, st = by_ds.get(d.id), stats[d.id]
+            tds.append("<td></td>" if o is None or st is None else f"<td class='n'>{cell(o, st)}</td>")
+        rows.append(f"<tr class='{'foot' if i == 0 else 'sub'}'>" + "".join(tds) + "</tr>")
+    after = ("<p class='note'>Spot heights are surveyed ground levels with no physical mark, on hardstand and soft "
+             "ground, so they carry surface roughness and are kept apart from the control point statistics. Use them "
+             "as supporting evidence when a vertical shift or a reprocess is considered. dZ in mm = surface minus "
+             f"spot height; ▲ surface higher, ▼ lower.{' * Trimmed mean, see the Summary.' if star else ''}</p>")
+    if session.spots_disregarded:
+        by_id = {p.id: p for p in session.spots}
+        items = "".join(
+            f"<li>{_e(pid)} <span class='muted'>E {by_id[pid].x:.3f} · N {by_id[pid].y:.3f} · Z {by_id[pid].z:.3f}"
+            f" · {'no data nearby' if d is None else f'nearest data {d:.0f} m'}</span></li>"
+            for pid, d in session.spots_disregarded.items() if pid in by_id)
+        after += (f"<p class='note'><b>Disregarded:</b> {len(session.spots_disregarded)} spot heights are more than "
+                  f"{session.settings.spot_max_outside:g} m outside the DEM and point cloud, so they are left out of "
+                  f"the table and the averages:</p><ul class='disregarded note'>{items}</ul>")
+    return head, rows, after
+
+
+def _above_below(dz: float) -> str:
+    return "level" if abs(dz) < LEVEL else ("▲ above" if dz > 0 else "▼ below")
 
 
 def _crs_text(d) -> str:

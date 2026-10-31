@@ -37,6 +37,8 @@ class Settings:
     tol_z: float | None = None  # m, per-point |dZ| tolerance
     tol_xy: float | None = None  # m, per-point dXY tolerance
     report_chip_size: float = 2.0  # m, chip width in the report
+    trim: float = 0.10  # average offsets: fraction of dZ values left out, half from each end (Excel TRIMMEAN)
+    spot_max_outside: float = 10.0  # m; spot heights further than this from all data are disregarded
 
 
 @dataclass
@@ -48,6 +50,14 @@ class Session:
     observations: list[Observation] = field(default_factory=list)
     cloud_class_counts: dict[str, dict[int, int]] = field(default_factory=dict)  # dataset id -> counts
     created: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    # Spot heights: surveyed ground levels with no physical mark. Z checks only;
+    # kept apart from the control points so they never mix into their stats.
+    spots_path: str = ""
+    spots: list[ControlPoint] = field(default_factory=list)
+    spot_observations: list[Observation] = field(default_factory=list)
+    # Spot heights more than settings.spot_max_outside from every dataset's data: id -> distance
+    # to the nearest data in m (None = no data found at all). They are disabled and listed apart.
+    spots_disregarded: dict[str, float | None] = field(default_factory=dict)
 
     def point(self, pid: str) -> ControlPoint:
         return next(p for p in self.points if p.id == pid)
@@ -63,12 +73,12 @@ class Session:
     @classmethod
     def load(cls, path: str | Path) -> Session:
         d = json.loads(Path(path).read_text(encoding="utf-8"))
-        return cls(
-            control_path=d["control_path"],
-            points=[ControlPoint(**{**p, "role": Role(p["role"])}) for p in d["points"]],
-            datasets=[Dataset(ds["id"], DatasetKind(ds["kind"]), ds["path"]) for ds in d["datasets"]],
-            settings=Settings(**{k: v for k, v in d.get("settings", {}).items() if k in Settings.__dataclass_fields__}),
-            observations=[
+
+        def points(rows):
+            return [ControlPoint(**{**p, "role": Role(p["role"])}) for p in rows]
+
+        def observations(rows):
+            return [
                 Observation(
                     **{
                         **o,
@@ -78,12 +88,23 @@ class Session:
                         "auto_status": ObsStatus(o["auto_status"]) if o.get("auto_status") else None,
                     }
                 )
-                for o in d.get("observations", [])
-            ],
+                for o in rows
+            ]
+
+        return cls(
+            control_path=d["control_path"],
+            points=points(d["points"]),
+            datasets=[Dataset(ds["id"], DatasetKind(ds["kind"]), ds["path"]) for ds in d["datasets"]],
+            settings=Settings(**{k: v for k, v in d.get("settings", {}).items() if k in Settings.__dataclass_fields__}),
+            observations=observations(d.get("observations", [])),
             cloud_class_counts={
                 k: {int(c): n for c, n in v.items()} for k, v in d.get("cloud_class_counts", {}).items()
             },
             created=d.get("created", ""),
+            spots_path=d.get("spots_path", ""),
+            spots=points(d.get("spots", [])),
+            spot_observations=observations(d.get("spot_observations", [])),
+            spots_disregarded=d.get("spots_disregarded", {}),
         )
 
 

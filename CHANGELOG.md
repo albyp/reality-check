@@ -3,7 +3,82 @@
 All notable changes to RealityCheck. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.3.0] - 2026-10-31
+
+### Added
+- Project templates: for each input, a folder relative to the project
+  folder plus file patterns and exclusions. Built in: *Project root*
+  (default), *Exports folder* and a draft *Pix4D* layout. In Setup, choose a
+  template and drop or load a project folder; files the template cannot find
+  open a dialog to choose them or continue without them (orthomosaic and DEM
+  are optional; control points and one dataset are required).
+- `settings.json` next to the exe (or `%APPDATA%\RealityCheck` if that folder
+  is read-only) with default tolerances, cloud radius, report chip width,
+  the default template and all templates. Created on first run.
+- Settings tab: edit defaults; add, edit, duplicate, delete and test
+  templates on a folder; restore the built-in templates.
+- Batch tab: run many project folders with one template. Drag folders in,
+  see what each project resolved to, choose PDF/HTML/CSV and an optional
+  single output folder, and get a results table with each report and a link
+  to open the session in Review.
+- Command line: `batch` and `templates`.
+- Setup: *Clear* button. Empties the inputs, drops the results and closes
+  every file RealityCheck holds open, so the files can be replaced or
+  updated outside RealityCheck. Asks first if review work is unsaved.
+- Report: Z comparison table (control Z against each DEM / point cloud Z,
+  point by point, with dZ, above/below and the mean offset), and a line
+  per surface under the summary saying whether it sits above or below the
+  control on average, with the median and how many points are above and
+  below (checkpoints if set, else all enabled points).
+- Spot heights: an optional second CSV of surveyed ground levels with no
+  physical mark. Z checks only, against the DEM and point cloud (sampled in
+  the same pass over the cloud), kept apart from the control point
+  statistics. The report gets a summary line per surface and a compact
+  Spot heights table (dZ per surface, mean, median, SD, RMSE, counts above
+  and below). Setup input, auto-detect (`*spot*`, `*_sh`), templates
+  (optional: never reported missing), Batch, CSV exports (role `spot`), the
+  session file, and `run --spots` on the command line.
+- Average offsets use a trimmed mean, 90% by default (Excel `TRIMMEAN` with
+  10%), marked with `*` and explained in a note. Set on the Settings tab or
+  as `trim` in `settings.json`; `run --trim` on the command line. The summary
+  CSV gets a `trimmed_mean_90` column.
+- Spot heights more than 10 m from all DEM and point cloud data are
+  disregarded: left out of the table and the averages, and listed under the
+  table with their distance to the nearest data (also in the run log and the
+  session file). The cloud's coverage is recorded on a 1 m grid in the same
+  pass. Set as `spot_max_outside` in `settings.json`, on the Settings tab, or
+  `run --spot-max-outside`.
+- Templates: a folder can contain wildcards for the part that changes per
+  project (e.g. `04_Agisoft/Results_*`), and blank file patterns mean the
+  usual files for that input. A control rule never picks a spot heights file
+  when another file matches.
+- Template editor: an example project folder, a folder button per input that
+  browses inside it and fills in the relative path, the default patterns shown
+  in grey, and *Test* showing what each input finds in the example (replaces
+  *Test on a folder*).
+- Saved copies of the built-in templates in an existing `settings.json` get
+  the spot heights rule, and their control rule skips spot height files.
+
+### Changed
+- Site overview: drawn at its printed size, so text and symbols are always
+  the same size on paper (labels and legend about 7.5 pt) and the map fills
+  the page width. A long, narrow site is cut into numbered strips at one
+  scale: north-south sites into strips side by side (north first), east-west
+  sites into strips stacked down the page (west first), up to four per page,
+  with a slight overlap at each join. A long site with crowded points
+  continues on more pages. A site is only cut up when that makes the map at
+  least 1.5 times larger.
+
+### Fixed
+- RealityCheck's own exports (`*_RealityCheck*`) are never picked up as
+  inputs when a folder is scanned.
+- Saved templates now appear straight away in the Setup and Batch template
+  lists (they only appeared after a restart).
+- Folder pickers (project folder, batch folders, output folder) use the
+  native Windows folder dialog in browser mode, in front of the browser,
+  like the file dialogs fixed in 0.2.1.
+- The browser-mode folder dialog now opens at the suggested folder (a
+  64-bit address overflowed an untyped Windows call, so it was ignored).
 
 ## [0.2.1] - 2026-10-29
 

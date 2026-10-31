@@ -142,15 +142,17 @@ def test_output_names_and_title(control_path, dem_path):
 
 
 def test_overview_marks_every_point(control_path, ortho_path, las_path):
-    from reality_check.overview import render_overview
+    from reality_check.overview import PX_PER_MM, SHEET_H_MM, SHEET_W_MM, render_overview
 
     res = _run(control_path, ortho_path, las_path)
     s = res.session
     set_manual_xy(s, "A", "ortho:ortho", s.point("A").x + 0.03, s.point("A").y - 0.02)
     set_not_found(s, "B", "ortho:ortho")
     s.point("C").enabled = False
-    img = render_overview(s, width=800)
-    assert img.width == 800
+    ov = render_overview(s)
+    assert len(ov.sheets) == 1
+    img = ov.sheets[0]
+    assert img.width == round(SHEET_W_MM * PX_PER_MM) and img.height <= SHEET_H_MM * PX_PER_MM
     assert img.getpixel((img.width - 2, img.height - 2)) == (255, 255, 255)  # legend strip below the map
 
 
