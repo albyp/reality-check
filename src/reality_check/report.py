@@ -18,7 +18,7 @@ from reality_check.models import CheckKind, DatasetKind, ObsSource, ObsStatus, R
 from reality_check.raster import raster_info
 from reality_check.render import ChipRenderer, to_data_url
 from reality_check.review import point_results
-from reality_check.overview import render_overview
+from reality_check.overview import PX_PER_MM, render_overview
 from reality_check.session import Session, project_title
 from reality_check.stats import LEVEL, Stats, summarise, trim_note, z_offsets
 
@@ -96,7 +96,7 @@ h2 .cont { font-weight:400; font-size:13px; color:var(--muted); }
   .screen-only { display:none; }
   .print-only { display:block; }
   .page-break { break-before:page; }
-  figure.overview img { width:auto; max-width:100%; max-height:235mm; margin:0 auto; }
+  figure.overview img { width:var(--w, auto); max-width:100%; margin:0 auto; }
 }
 """
 
@@ -218,9 +218,18 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
     w("</section>")
 
     overview = render_overview(session)
-    w(f"<section class='block'><h2>Site overview</h2><figure class='overview'><img src='{to_data_url(overview, 'JPEG')}' alt='Site overview with control points'>"
-      "<figcaption>Ellipses show horizontal error (semi-axes dX and dY, exaggerated by the stated factor); "
-      "the line points in the error direction. Colour shows dZ.</figcaption></figure></section>")
+    caption = ("Ellipses show horizontal error (semi-axes dX and dY, exaggerated by the stated factor); "
+               "the line points in the error direction. Colour shows dZ.")
+    if overview.layout.strips > 1:
+        caption += (" The site is long and narrow, so it is cut into numbered strips at one scale, "
+                    "in the order stated under the map.")
+    for i, sheet in enumerate(overview.sheets):
+        heading = "Site overview" + (" <span class='cont'>(continued…)</span>" if i else "")
+        # Printed at the size it was drawn, so text keeps its size on paper.
+        w(f"<section class='block{' page-break' if i else ''}'><h2>{heading}</h2><figure class='overview'>"
+          f"<img style='--w:{sheet.width / PX_PER_MM:.1f}mm' src='{to_data_url(sheet, 'JPEG')}' "
+          f"alt='Site overview with control points'>"
+          f"{f'<figcaption>{caption}</figcaption>' if i == len(overview.sheets) - 1 else ''}</figure></section>")
 
     stat_rows = []
     for r in summary:
