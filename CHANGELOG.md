@@ -59,6 +59,16 @@ All notable changes to RealityCheck. Format based on
 - Saved copies of the built-in templates in an existing `settings.json` get
   the spot heights rule, and their control rule skips spot height files.
 
+### Changed
+- Site overview: drawn at its printed size, so text and symbols are always
+  the same size on paper (labels and legend about 7.5 pt) and the map fills
+  the page width. A long, narrow site is cut into numbered strips at one
+  scale: north-south sites into strips side by side (north first), east-west
+  sites into strips stacked down the page (west first), up to four per page,
+  with a slight overlap at each join. A long site with crowded points
+  continues on more pages. A site is only cut up when that makes the map at
+  least 1.5 times larger.
+
 ### Fixed
 - RealityCheck's own exports (`*_RealityCheck*`) are never picked up as
   inputs when a folder is scanned.
