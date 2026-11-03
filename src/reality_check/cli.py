@@ -1,8 +1,9 @@
 """Command line interface.
 
-    reality-check gui
+    reality-check gui [--open SESSION]
+    reality-check SESSION.rcheck.json
     reality-check run --control gcp.csv --ortho ortho.tif --dem dem.tif --cloud cloud.laz --out results
-    reality-check batch --template "Exports folder" D:/Surveys/pit_a D:/Surveys/pit_b --pdf
+    reality-check batch --template "Exports folder" D:/Surveys/pit_a D:/Surveys/pit_b --pdf [--open]
     reality-check templates
     reality-check classes cloud.laz
     reality-check crs list | export FILE | import FILE
@@ -23,7 +24,7 @@ from reality_check.export import write_residuals, write_summary
 from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
 from reality_check.report import write_html, write_pdf
-from reality_check.session import Settings, output_name
+from reality_check.session import SESSION_SUFFIX, Settings, output_name
 from reality_check.stats import summarise, z_offsets
 
 
@@ -64,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--browser", action="store_true", help="use a browser tab instead of the desktop window")
     g.add_argument("--port", type=int, default=8765, help="browser mode port (default 8765)")
     g.add_argument("--no-browser", action="store_true", help="browser mode: do not open a tab")
+    g.add_argument("--open", default="", metavar="SESSION", help="open this session file (.rcheck.json) for review")
 
     b = sub.add_parser("batch", help="run many project folders with one template")
     b.add_argument("projects", nargs="+", type=Path, help="project folders")
@@ -74,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--csv", action="store_true", help="write residuals and summary CSVs")
     b.add_argument("--tol-z", type=float, default=None, help="Z tolerance in metres (default: settings.json)")
     b.add_argument("--tol-xy", type=float, default=None, help="XY tolerance in metres (default: settings.json)")
+    b.add_argument("--open", action="store_true",
+                   help="when done, open the GUI on the first finished project's session for review")
 
     t = sub.add_parser("templates", help="list project templates and where settings.json is")
 
@@ -188,7 +192,18 @@ def cmd_batch(a) -> int:
         print(f"{it.status.upper():8} {it.project.name}" + (f"  ({it.message})" if it.message else ""))
         for h in it.headline:
             print(f"         {h}")
-    return 0 if all(it.status != "failed" for it in items) else 1
+    rc = 0 if all(it.status != "failed" for it in items) else 1
+    if a.open:
+        done = [it for it in items if it.status == "done" and it.session_path]
+        if done:
+            from reality_check.gui import start_desktop
+
+            if len(done) > 1:
+                print(f"Opening {Path(done[0].session_path).name}; the other sessions are next to their reports.")
+            start_desktop(open_session=done[0].session_path)
+        else:
+            print("Nothing to open: no project finished.")
+    return rc
 
 
 def cmd_templates(a) -> int:
@@ -209,10 +224,13 @@ def cmd_templates(a) -> int:
 def cmd_gui(a) -> int:
     from reality_check.gui import start, start_desktop
 
+    if a.open and not Path(a.open).is_file():
+        print(f"error: session file not found: {a.open}", file=sys.stderr)
+        return 2
     if a.browser or a.no_browser:
-        start(port=a.port, show=not a.no_browser)
+        start(port=a.port, show=not a.no_browser, open_session=a.open)
     else:
-        start_desktop()
+        start_desktop(open_session=a.open)
     return 0
 
 
@@ -221,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     double_clicked = not argv
     if double_clicked:  # started from Explorer: open the GUI
         argv = ["gui"]
+    elif len(argv) == 1 and argv[0].lower().endswith(SESSION_SUFFIX) and Path(argv[0]).is_file():
+        argv = ["gui", "--open", argv[0]]  # a session file opened with RealityCheck.exe (Open with, drag onto exe)
     a = build_parser().parse_args(argv)
     commands = {"run": cmd_run, "batch": cmd_batch, "templates": cmd_templates, "classes": cmd_classes,
                 "crs": cmd_crs, "gui": cmd_gui}
