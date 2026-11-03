@@ -14,6 +14,8 @@ Remove-Item -Recurse -Force build\work
 
 # The GPL requires the license to travel with the binary.
 Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md, CHANGELOG.md dist\RealityCheck\
+# Automation helpers (the Metashape batch script); see "Automation" in the README.
+Copy-Item -Recurse scripts dist\RealityCheck\scripts
 
 $zip = "dist\RealityCheck-$version-win64.zip"
 if (Test-Path $zip) { Remove-Item $zip }
