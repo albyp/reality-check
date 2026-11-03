@@ -182,6 +182,96 @@ default 0.5 m), `--classes 2,11`, `--tol-z`, `--tol-xy`, `--chip-size`,
 `document` in a session file, e.g. `{"client": "…", "document_number": "…",
 "signatories": [{"role": "Prepared by", "name": "…"}]}`).
 
+`gui --open FILE.rcheck.json` opens a session for review; so does
+`RealityCheck.exe FILE.rcheck.json` (for example *Open with* on a session
+file). `batch … --open` opens the first finished project's session in the GUI
+when the batch is done.
+
+## Automation
+
+RealityCheck can run without anyone opening it: give `batch` a project folder
+and the name of your template, and it finds the files, runs the checks and
+writes the report and session next to the project. Set up a template for your
+own folder layout on the Settings tab first (templates are per company or per
+site; there is no one layout that fits everyone), and test it on a finished
+project.
+
+### Metashape Professional: last step of a batch
+
+The download includes `scripts\metashape\realitycheck_batch.py`. It runs
+RealityCheck on the open Metashape project, so it can be the last job of a
+Batch Process, after the export jobs:
+
+1. *Workflow → Batch Process → Add*, job type **Run Script**.
+2. **Path**: `<RealityCheck folder>\scripts\metashape\realitycheck_batch.py`
+3. **Arguments**, for example:
+   `--template "My template" --up 1 --pdf --open`
+   - `--template`: your RealityCheck template (default: the default template).
+   - `--up N`: the project folder is N folders above the folder holding the
+     `.psx` (for example `1` for `PROJECT\04_Agisoft\job.psx`).
+   - `--pdf --html --csv`: outputs (default HTML). `--out FOLDER`: write them
+     there instead of the project folder.
+   - `--open`: open RealityCheck on the result for review when it is done.
+   - `--wait`: hold the batch until RealityCheck finishes (by default
+     Metashape carries on).
+4. Save the batch as a preset to reuse it.
+
+The same script runs once from *Tools → Run Script*. If the script is not in
+the RealityCheck folder it came with, pass `--exe PATH\RealityCheck.exe` or
+set the `REALITYCHECK_EXE` environment variable. Metashape Standard has no
+Python scripting, so this needs Professional. Output goes to
+`%LOCALAPPDATA%\RealityCheck\realitycheck.log`.
+
+### Watching an export folder (Pix4D and anything else)
+
+PIX4Dmatic has no batch command line, and the Pix4Dmapper command line needs
+a PIX4Dengine Server licence, so for Pix4D (or any software) the simple route
+is a script that watches for new exports and runs RealityCheck. This is a
+starting point to adapt, not a supported tool. Save as `watch.ps1`, set the
+paths and template, and run it in a PowerShell window:
+
+```powershell
+$exe      = "C:\Tools\RealityCheck\RealityCheck.exe"
+$projects = "D:\Surveys"          # one sub-folder per project
+$template = "My template"
+$marker   = "*_Piecewise.laz"     # a file that only exists when the exports are finished
+
+$done = @{}
+while ($true) {
+    Get-ChildItem $projects -Directory | ForEach-Object {
+        $ready  = Get-ChildItem $_.FullName -Recurse -Filter $marker -ErrorAction SilentlyContinue | Select-Object -First 1
+        $report = Get-ChildItem $_.FullName -Filter "*_RealityCheck.html" -ErrorAction SilentlyContinue
+        if ($ready -and -not $report -and -not $done[$_.FullName]) {
+            Start-Sleep -Seconds 120  # let the export finish writing
+            Start-Process $exe -Wait -ArgumentList "batch", "`"$($_.FullName)`"", "--template", "`"$template`"", "--pdf"
+            $done[$_.FullName] = $true
+        }
+    }
+    Start-Sleep -Seconds 300
+}
+```
+
+Pick a marker file that the processing software writes last. To start it
+with Windows, add a Task Scheduler task that runs
+`powershell -ExecutionPolicy Bypass -File watch.ps1` at log on. With
+Pix4Dmapper's command line (PIX4Dengine Server licence), add the RealityCheck
+line after the processing line in the batch file instead:
+
+```bat
+pix4dmapper -c -r "D:\Surveys\pit_a\pit_a.p4d"
+start "" /wait "C:\Tools\RealityCheck\RealityCheck.exe" batch "D:\Surveys\pit_a" --template "My template" --pdf
+```
+
+## Updates
+
+When RealityCheck starts it asks GitHub whether a newer release exists and,
+if so, shows a notice with a link to the download (*Not now* hides it for this
+run; *Skip this version* until the next release). Nothing is downloaded or
+installed automatically. To update, close RealityCheck and extract the new
+zip over the old folder: `settings.json` is not in the zip, so your
+templates, defaults and company details are kept. Turn the check off on the
+Settings tab, or with `"updates": {"check": false}` in `settings.json`.
+
 ## Development (Windows)
 
 ```
@@ -201,6 +291,11 @@ The exe has no console window. Its output goes to
 `%LOCALAPPDATA%\RealityCheck\realitycheck.log`, and a crash shows an error
 box. Run from a terminal with arguments (`RealityCheck.exe run ...`), it
 prints to that terminal.
+
+In browser mode (no WebView2, or `gui --browser`), RealityCheck stops about
+10 seconds after its last tab closes, or at once with *Quit*; the browser asks
+first if review work is unsaved. `gui --no-browser` keeps running until it is
+stopped.
 
 RealityCheck always uses the GDAL/PROJ data bundled with rasterio. Mining
 software such as GEOVIA Surpac sets `PROJ_LIB` / `GDAL_DATA` system-wide to
