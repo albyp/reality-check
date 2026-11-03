@@ -116,6 +116,30 @@ class PointResult:
         """None if no tolerance is set or nothing was measured."""
         return None if not self.point.enabled else not self.exceeds
 
+    @property
+    def outside_data(self) -> bool:
+        """No dataset has data here: the point is outside every dataset, or on no-data cells in all of them."""
+        return bool(self.status) and all(o.status in OUTSIDE for o in self.status.values())
+
+
+OUTSIDE = (ObsStatus.OUT_OF_EXTENT, ObsStatus.NO_DATA)
+OUTSIDE_NOTE = "Outside the data"
+
+
+def disable_outside_data(session: Session) -> list[str]:
+    """Disable every enabled point that no dataset has data for. Returns their ids.
+
+    A point with no note gets "Outside the data", so the report says why it is off.
+    """
+    done = []
+    for pr in point_results(session):
+        cp = pr.point
+        if cp.enabled and pr.outside_data:
+            cp.enabled = False
+            cp.note = cp.note or OUTSIDE_NOTE
+            done.append(cp.id)
+    return done
+
 
 def point_results(session: Session) -> list[PointResult]:
     s = session.settings

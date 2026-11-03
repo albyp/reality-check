@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 
 from reality_check import __version__
+from reality_check.document import DocumentInfo
 from reality_check.models import (
     CheckKind,
     ControlPoint,
@@ -39,6 +40,13 @@ class Settings:
     report_chip_size: float = 2.0  # m, chip width in the report
     trim: float = 0.10  # average offsets: fraction of dZ values left out, half from each end (Excel TRIMMEAN)
     spot_max_outside: float = 10.0  # m; spot heights further than this from all data are disregarded
+    document: DocumentInfo = field(default_factory=DocumentInfo)  # report title block, title strip, sign-off
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Settings:
+        s = cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__ and k != "document"})
+        s.document = DocumentInfo.from_dict(d.get("document"))
+        return s
 
 
 @dataclass
@@ -95,7 +103,7 @@ class Session:
             control_path=d["control_path"],
             points=points(d["points"]),
             datasets=[Dataset(ds["id"], DatasetKind(ds["kind"]), ds["path"]) for ds in d["datasets"]],
-            settings=Settings(**{k: v for k, v in d.get("settings", {}).items() if k in Settings.__dataclass_fields__}),
+            settings=Settings.from_dict(d.get("settings", {})),
             observations=observations(d.get("observations", [])),
             cloud_class_counts={
                 k: {int(c): n for c, n in v.items()} for k, v in d.get("cloud_class_counts", {}).items()

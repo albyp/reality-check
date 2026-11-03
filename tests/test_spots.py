@@ -93,7 +93,7 @@ def test_report_csv_and_session_with_spot_heights(tmp_path, control_path, dem_pa
         html = build_html(s, r, res.warnings)
     finally:
         r.close()
-    assert "<h2>Spot heights</h2>" in html and "pit_spot_heights.csv" in html
+    assert "<span class='t'>SPOT HEIGHTS</span>" in html and "pit_spot_heights.csv" in html
     assert "above the spot heights on average" in html and "Trimmed mean (90%)" in html
     assert html.count("<figure>") == 4 * 2  # no chips for spot heights
 

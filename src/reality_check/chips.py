@@ -7,6 +7,7 @@ report handle ortho, DEM and point cloud the same way. North is up.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 import numpy as np
 import rasterio
@@ -20,9 +21,9 @@ BACKGROUND = (40, 40, 40)
 CROSSHAIR = (255, 40, 40)
 OBSERVED = (0, 220, 255)
 
-# Elevation colour ramp (low -> high).
-_RAMP = np.array([[49, 54, 149], [69, 117, 180], [116, 173, 209], [171, 217, 233], [254, 224, 144],
-                  [253, 174, 97], [244, 109, 67], [215, 48, 39]], dtype=float)
+# Elevation colour ramp (low -> high): navy, slate, grey, sand, cream. Lightness rises end to end, so it
+# reads as an ordered grey scale on a black-and-white copy (Plumb house style; the same ramp as dZ).
+_RAMP = np.array([[20, 35, 63], [63, 101, 147], [169, 180, 184], [230, 194, 122], [251, 240, 214]], dtype=float)
 
 
 def _ramp(t: np.ndarray) -> np.ndarray:
@@ -32,7 +33,14 @@ def _ramp(t: np.ndarray) -> np.ndarray:
     return _RAMP[i] * (1 - f) + _RAMP[i + 1] * f
 
 
+@lru_cache(maxsize=16)
 def _font(size: int):
+    """Bahnschrift (DIN lettering, Plumb house style; Windows 10+), else Pillow's built-in font."""
+    for name in ("bahnschrift.ttf", "arialn.ttf", "arial.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
     try:
         return ImageFont.load_default(size=size)
     except TypeError:  # Pillow < 10.1
