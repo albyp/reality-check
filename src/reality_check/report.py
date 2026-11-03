@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import html
+import itertools
+import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +17,7 @@ from pathlib import Path
 from reality_check import __version__
 from reality_check.cloud import CLASS_NAMES, cloud_info
 from reality_check.crs import describe
+from reality_check.document import DocumentInfo, logo_data_url
 from reality_check.models import CheckKind, DatasetKind, ObsSource, ObsStatus, Role
 from reality_check.raster import raster_info
 from reality_check.render import ChipRenderer, to_data_url
@@ -22,6 +26,7 @@ from reality_check.overview import PX_PER_MM, render_overview
 from reality_check.session import Session, project_title
 from reality_check.stats import LEVEL, Stats, summarise, trim_note, z_offsets
 
+log = logging.getLogger("reality_check")
 KIND_LABEL = {DatasetKind.ORTHO: "Orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "Point cloud"}
 OFFSET_LABEL = {DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "point cloud"}  # in a sentence
 COMPONENT_LABEL = {"dz": "dZ", "dx": "dX", "dy": "dY", "dxy": "dXY"}
@@ -32,60 +37,120 @@ STATUS_LABEL = {
     ObsStatus.OUT_OF_EXTENT: "Outside dataset",
 }
 
+# Plumb house style: "Drawing Sheet" (chosen 2026-11-02), as in CounterCheck's report. Engineering drawing
+# conventions (AS 1100.101 / ISO 7200) without the sheet frame: a title block with ruled cells, boxed section
+# numbers, ruled schedules, DIN lettering (Bahnschrift), ink only. Red is kept for nonconformance (FAIL, values
+# over tolerance, targets not found) and nothing else, so the report reads on a black-and-white copier. Every
+# sheet carries a title strip (see _page_css), so a loose page can be traced.
 CSS = """
-:root { --ink:#1d2327; --muted:#5f6b73; --line:#d8dee2; --soft:#f3f6f8; --accent:#0b6e79;
-        --ok:#1a7f37; --bad:#c62828; --warn:#b26a00; }
+/* Bahnschrift has no ±, …, ✓, ✗, ², ≈, ▲ or ▼ in print; take those from Segoe UI, keep DIN lettering for the rest. */
+@font-face { font-family:"Plumb Symbols"; src:local("Segoe UI Symbol"), local("Segoe UI"), local("Arial");
+             unicode-range:U+00B1, U+00B2, U+00B3, U+00D7, U+2026, U+2212, U+2248, U+2713, U+2717, U+25B2, U+25BC, U+25EF; }
+:root { --ink:#111; --mid:#555; --hair:#bdbdbd; --red:#c8102e;
+        --w1:0.18mm; --w2:0.25mm; --w3:0.35mm; --w5:0.5mm; --w7:0.7mm;
+        --sans:"Plumb Symbols", "Bahnschrift", "DIN Alternate", "Arial Narrow", Arial, sans-serif;
+        --cond:"Plumb Symbols", "Bahnschrift SemiCondensed", "Bahnschrift", "Arial Narrow", sans-serif; }
 * { box-sizing:border-box; }
-body { font:13px/1.45 "Segoe UI", system-ui, sans-serif; color:var(--ink); margin:0; background:#fff; }
-main { max-width:1000px; margin:0 auto; padding:28px 24px 60px; }
-h1 { font-size:24px; margin:0; letter-spacing:-.01em; }
-h1 small { display:block; font-size:13px; font-weight:400; color:var(--muted); margin-top:2px; }
-h2 { font-size:16px; margin:30px 0 10px; padding-bottom:4px; border-bottom:2px solid var(--accent); }
-h3 { font-size:14px; margin:0; }
-.meta { display:grid; grid-template-columns:max-content 1fr; gap:3px 16px; margin-top:16px; color:var(--muted); }
-.meta b { color:var(--ink); font-weight:600; }
-table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }
-th, td { padding:4px 8px; border-bottom:1px solid var(--line); text-align:left; }
-th { background:var(--soft); font-weight:600; font-size:12px; }
+html { background:#e4e4e1; }
+body { margin:0; font:8.5pt/1.4 var(--sans); color:var(--ink); font-variant-numeric:tabular-nums; }
+main { width:210mm; margin:24px auto; background:#fff; padding:16mm 14mm 24mm; }
+a { color:inherit; }
+.k { font:6pt var(--sans); letter-spacing:.08em; color:var(--mid); white-space:nowrap; }
+.muted { color:var(--mid); }
+
+/* Title block: logos either side of the title, then a row of ruled cells, then the inputs schedule. */
+.tb { display:grid; grid-template-columns:1fr; border:var(--w7) solid var(--ink); }
+.tb.logo-l { grid-template-columns:36mm 1fr; } .tb.logo-r { grid-template-columns:1fr 36mm; }
+.tb.logo-l.logo-r { grid-template-columns:36mm 1fr 36mm; }
+.tb > * { border-right:var(--w3) solid var(--ink); min-width:0; }
+.tb > :last-child { border-right:none; }
+.tb .logo { display:flex; align-items:center; justify-content:center; padding:2mm; }
+.tb .logo img { max-width:32mm; max-height:16mm; object-fit:contain; }
+.tb .ttl { padding:2.4mm 3.5mm; }
+.tb h1 { font:600 13pt/1.15 var(--sans); margin:.6mm 0 .8mm; letter-spacing:.02em; }
+.tb .sub { font-size:8pt; }
+.cells { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0, auto); border:var(--w7) solid var(--ink);
+         border-top:none; margin-bottom:2mm; }
+.cells > div { border-right:var(--w2) solid var(--ink); padding:1.1mm 1.8mm 1.3mm; min-width:0; }
+.cells > div:last-child { border-right:none; }
+.cells b { display:block; font-weight:600; font-size:7.6pt; }
+.warn { border:var(--w5) solid var(--ink); padding:1.2mm 2mm; margin-top:2mm; }
+.warn .k { margin-right:2mm; }
+
+/* Section titles: boxed number, underlined title (the drawing view-title convention). */
+h2 { display:flex; align-items:baseline; gap:2.5mm; margin:5mm 0 2mm; font:600 9.5pt var(--sans); letter-spacing:.08em; }
+h2 .num { display:inline-block; min-width:9mm; text-align:center; border:var(--w5) solid var(--ink);
+          padding:.2mm 1.2mm; letter-spacing:.02em; }
+h2 .t { border-bottom:var(--w5) solid var(--ink); padding-bottom:.4mm; }
+h2 .sc, h2 .cont { margin-left:auto; font:400 7pt var(--sans); letter-spacing:.06em; color:var(--mid); }
+h2 .sc ~ .cont { margin-left:0; }
+h2.page-break, .page-break > h2:first-child { margin-top:0; }
+h3 { font:600 8pt var(--sans); letter-spacing:.08em; margin:0; }
+
+/* Schedules (tables). */
+table { border-collapse:collapse; width:100%; border:var(--w5) solid var(--ink); }
+th, td { border:var(--w2) solid var(--ink); padding:.7mm 2mm; text-align:left; vertical-align:top; }
+thead th { font:600 6.5pt var(--cond); letter-spacing:.08em; border-bottom:var(--w5) solid var(--ink); }
+tbody th { font-weight:600; font-size:7.5pt; width:30%; }
 td.n, th.n { text-align:right; }
-.cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:10px; }
-.card { border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
-.card .k { color:var(--muted); font-size:12px; }
-.card .v { font-size:22px; font-weight:600; }
-.card .v small { font-size:12px; font-weight:400; color:var(--muted); }
-.pass { color:var(--ok); font-weight:600; } .fail { color:var(--bad); font-weight:600; }
-.bad { color:var(--bad); font-weight:600; } .muted { color:var(--muted); }
-.tag { display:inline-block; font-size:11px; padding:0 6px; border-radius:9px; margin-right:3px;
-       background:var(--soft); border:1px solid var(--line); white-space:nowrap; }
-.tag.red { color:var(--bad); border-color:#f0b4b4; background:#fdf0f0; }
-.tag.amber { color:var(--warn); border-color:#f0d49a; background:#fff8e8; }
-.tag.blue { color:var(--accent); border-color:#a9d3d8; background:#eef8f9; }
-ul.issues { margin:0; padding-left:18px; }
-ul.offsets { margin:10px 0 0; padding-left:18px; }
-ul.disregarded { margin:2px 0 0; padding-left:18px; }
-tr.foot td { border-top:2px solid var(--line); border-bottom:none; }
+td.bad { color:var(--red); font-weight:600; } td.bad::after { content:"\\00A0\\2717"; }
+tr.foot td { border-top:var(--w5) solid var(--ink); }
+tr.sub td { color:var(--mid); }
 .compact table { width:auto; min-width:50%; }
-.compact td, .compact th { padding:1px 10px; font-size:11px; }
-tr.sub td { border-bottom:none; padding-top:1px; padding-bottom:1px; color:var(--muted); }
-.point { border:1px solid var(--line); border-radius:6px; padding:12px; margin:0 0 14px; break-inside:avoid; }
-.point.disabled { opacity:.6; }
-.point header { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px; margin-bottom:8px; }
-.point .coords { color:var(--muted); font-size:12px; margin-left:auto; }
-.chips { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:8px; margin-top:10px; }
-.chips figure { margin:0; }
-.chips img { width:100%; display:block; border-radius:4px; }
-.chips figcaption { font-size:11px; color:var(--muted); margin-top:2px; }
-figure.overview { margin:0; break-inside:avoid; }
-figure.overview img { width:100%; display:block; border:1px solid var(--line); border-radius:4px; }
-figure.overview figcaption { font-size:11px; color:var(--muted); margin-top:4px; }
-.warn { background:#fff8e8; border:1px solid #f0d49a; border-radius:6px; padding:8px 12px; margin-top:12px; }
-.note { color:var(--muted); font-size:12px; }
+.compact td, .compact th { padding:.3mm 2mm; font-size:7pt; }
 .table-wrap { overflow-x:auto; }
-h2 .cont { font-weight:400; font-size:13px; color:var(--muted); }
+
+/* Summary: a ruled schedule of results, the PASS / FAIL stamp first. Ruled by the gaps, so it can wrap. */
+.sched { display:grid; gap:var(--w2); background:var(--ink); border:var(--w5) solid var(--ink); }
+.sched > div { background:#fff; padding:1.4mm 2mm 1.6mm; min-width:0; }
+.sched .k { white-space:normal; }
+.sched .v { font:500 14pt/1.2 var(--sans); white-space:nowrap; margin-top:.8mm; }
+.sched .v small { font-size:8pt; font-weight:400; }
+.sched .res { display:flex; flex-direction:column; justify-content:center; text-align:center; }
+.stamp { display:inline-block; font:700 12pt var(--sans); letter-spacing:.14em; border:var(--w7) solid var(--ink);
+         padding:.4mm 2.4mm; margin-top:.6mm; }
+.stamp.fail { color:var(--red); border-color:var(--red); }
+.sm { font-size:6.5pt; color:var(--mid); margin-top:.6mm; }
+.ok::before { content:"\\2713  "; }
+.nc { color:var(--red); font-weight:600; } .nc::before { content:"\\2717  "; }
+
+/* General notes: offsets and items to review. */
+ol.gn, ul.offsets { margin:2mm 0 0; padding-left:5mm; } ol.gn { margin:0; } ol.gn li, ul.offsets li { margin-bottom:1.2mm; }
+ul.disregarded { margin:.6mm 0 0; padding-left:5mm; }
+.tag { display:inline-block; font:600 6.5pt var(--sans); letter-spacing:.08em; text-transform:uppercase;
+       border:var(--w3) solid var(--ink); padding:0 1mm; margin-left:1.5mm; white-space:nowrap; }
+.tag.nc::before { content:none; } .tag.nc { border-color:var(--red); }
+
+/* Point details: one ruled box per point, its id boxed like a detail callout. */
+.point { border:var(--w5) solid var(--ink); margin:0 0 4mm; break-inside:avoid; }
+.point.disabled { opacity:.6; }
+.point header { display:flex; flex-wrap:wrap; align-items:baseline; gap:1mm; padding:1.2mm 2mm;
+                border-bottom:var(--w3) solid var(--ink); }
+.point h3 { border:var(--w5) solid var(--ink); padding:0 1.5mm; margin-right:1mm; }
+.point .coords { color:var(--mid); font-size:7.5pt; margin-left:auto; }
+.point .body { padding:2mm; }
+.point .note { margin-top:2mm; }
+.chips { display:grid; grid-template-columns:repeat(auto-fit, minmax(40mm, 1fr)); gap:2mm; margin-top:2mm; }
+.chips figure { margin:0; border:var(--w2) solid var(--ink); }
+.chips img { width:100%; display:block; }
+.chips figcaption { font-size:6.5pt; color:var(--mid); padding:.6mm 1.4mm .8mm; border-top:var(--w2) solid var(--ink); }
+
+/* Figures: ruled box, caption underneath. */
+figure.overview { margin:0; break-inside:avoid; border:var(--w5) solid var(--ink); }
+figure.overview img { width:100%; display:block; }
+figure.overview figcaption { font-size:7pt; color:var(--mid); padding:1mm 2.2mm 1.2mm; border-top:var(--w2) solid var(--ink); }
+.note { font-size:7pt; color:var(--mid); margin:1.4mm 0 0; }
+
+/* Sign-off: a ruled schedule, so names, signatures and dates line up whatever is filled in. */
+table.sign td { height:10mm; vertical-align:middle; }
+table.sign td.role { width:24mm; font:600 6.5pt var(--sans); letter-spacing:.08em; text-transform:uppercase; }
+table.sign td.sig { width:46mm; } table.sign td.dt { width:26mm; }
+.gen { font-size:6.5pt; color:var(--mid); margin-top:4mm; letter-spacing:.04em; text-transform:uppercase; }
 .print-only { display:none; }
 @media print {
-  @page { size:A4; margin:12mm; }
-  main { padding:0; max-width:none; }
+  html { background:none; }
+  /* The 186 mm page area is 702.99 px; Chromium clips it to 702 px, which would halve the right-hand rules. */
+  main { width:auto; margin:0; padding:0 .4mm 0 0; }
   /* A heading and its content print together; a block longer than a page is
      split into page-sized parts (see _table_block). */
   .block { break-inside:avoid; }
@@ -100,20 +165,121 @@ h2 .cont { font-weight:400; font-size:13px; color:var(--muted); }
 }
 """
 
+# Every sheet: running title and sheet number at the top; a three-cell title strip at the bottom.
+# Margin boxes are content-box: 2 x (60 + 4) + 54 + 4 = 186 mm, the page-area width.
+_PAGE_CSS = """
+@page { size:A4; margin:14mm 12mm 26mm 12mm;
+  @top-left { content:%(running)s; font:6.5pt "Plumb Symbols", "Bahnschrift", Arial, sans-serif; letter-spacing:.06em;
+              vertical-align:bottom; margin-bottom:2.5mm; }
+  @top-right { content:%(top_right)s; font:6.5pt "Plumb Symbols", "Bahnschrift", Arial, sans-serif; letter-spacing:.06em;
+               vertical-align:bottom; margin-bottom:2.5mm; }
+  @bottom-left { width:60mm; content:%(strip_left)s; white-space:pre; font:6.5pt/1.6 "Plumb Symbols", "Bahnschrift", Arial, sans-serif;
+                 letter-spacing:.04em; vertical-align:top; text-align:left; border-top:0.5mm solid #111;
+                 padding:1.6mm 2mm; margin-top:5mm; }
+  @bottom-center { width:54mm; content:%(strip_centre)s; white-space:pre; font:6.5pt/1.6 "Plumb Symbols", "Bahnschrift", Arial, sans-serif;
+                   letter-spacing:.04em; vertical-align:top; text-align:left; border-top:0.5mm solid #111;
+                   padding:1.6mm 2mm; margin-top:5mm; }
+  @bottom-right { width:60mm; content:%(strip_right)s; white-space:pre; font:6.5pt/1.6 "Plumb Symbols", "Bahnschrift", Arial, sans-serif;
+                  letter-spacing:.04em; vertical-align:top; text-align:left; border-top:0.5mm solid #111;
+                  padding:1.6mm 2mm; margin-top:5mm; }
+}
+"""
+
 
 def _e(s) -> str:
     return html.escape(str(s))
 
 
+def _css_esc(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("<", "\\3C ")
+
+
+def _css_lines(*lines: str) -> str:
+    """Several lines in one margin box (needs white-space:pre). Blank lines are dropped."""
+    return '"' + "\\A ".join(_css_esc(_caps(x)) for x in lines if x) + '"'
+
+
+def _caps(s: str) -> str:
+    """Drawing-style capitals for titles, keeping the unit symbols readable ("dZ", "mm", "m²")."""
+    s = re.sub(r"\b(\d+(?:\.\d+)?) ?MM\b", r"\1 mm", s.upper())
+    return re.sub(r"\bD(X|Y|Z|XY)\b", r"d\1", s)
+
+
+def _heading(n: str, title: str, note: str = "", cls: str = "") -> str:
+    """Section title: boxed number, the title in capitals, small print at the right."""
+    sc = f"<span class='sc'>{_e(note)}</span>" if note else ""
+    return (f"<h2{f' class={cls!r}' if cls else ''}><span class='num'>{_e(n)}</span><span class='t'>{_e(_caps(title))}"
+            f"</span>{sc}</h2>")
+
+
+def _page_css(doc: DocumentInfo, title: str, running: str, control: str, tolerances: str) -> str:
+    """Running title and sheet number at the top of every sheet; the three-cell title strip at the bottom.
+
+    The strip follows CounterCheck: company and title; client, site and job; document number, revision, issue
+    date and sheet. Without client, site or job, the centre cell names the control file and tolerances.
+    """
+    sheet = (f'"SHEET {_css_esc(doc.appendix.strip())}-" counter(page)' if doc.is_appendix
+             else '"SHEET " counter(page) " OF " counter(pages)')
+    ref = "  ·  ".join(x for x in (doc.document_number, f"REV {doc.revision}" if doc.revision else "") if x)
+    centre = [f"{k}  {v}" for k, v in (("Client", doc.client), ("Site", doc.site), ("Job", doc.job_number)) if v]
+    right = [f"{k}  {v}" for k, v in (("Document No.", doc.document_number), ("Rev", doc.revision),
+                                       ("Issued", doc.issued)) if v]
+    return _PAGE_CSS % {
+        "running": '"' + _css_esc(_caps(running)) + '"',
+        "top_right": (f'"{_css_esc(_caps(ref))}  ·  " ' if ref else "") + sheet,
+        "strip_left": _css_lines(doc.company or "Plumb RealityCheck", title, doc.confidentiality or doc.footer
+                                 or "QA/QC report"),
+        "strip_centre": _css_lines(*(centre or [f"Control  {control}", f"Tolerances  {tolerances}"])),
+        "strip_right": _css_lines(*right) + r' "\A " ' + sheet,
+    }
+
+
+def _logo_cell(path: str, alt: str) -> str:
+    """A logo cell for the title block, or "" when there is no logo (or it cannot be read)."""
+    if not path:
+        return ""
+    try:
+        return f"<div class='logo'><img src='{logo_data_url(path)}' alt='{_e(alt)}'></div>"
+    except (OSError, ValueError) as e:
+        log.warning("Logo left out of the report: %s", e)
+        return ""
+
+
+def _title_block(doc: DocumentInfo, title: str) -> str:
+    left, right = _logo_cell(doc.logo, doc.company or "Company logo"), _logo_cell(doc.client_logo,
+                                                                                 doc.client or "Client logo")
+    cls = "tb" + (" logo-l" if left else "") + (" logo-r" if right else "")
+    sub = doc.subtitle or "RealityCheck QA/QC report · photogrammetry and LiDAR against survey control"
+    cells = [("Project", doc.project), ("Site", doc.site), ("Client", doc.client), ("Job No.", doc.job_number),
+             ("Document No.", doc.document_number), ("Rev", doc.revision), ("Issued", doc.issued),
+             ("Author", doc.author)]
+    return (f"<section class='{cls}'>{left}<div class='ttl'><div class='k'>TITLE</div><h1>{_e(_caps(title))}</h1>"
+            f"<div class='sub'>{_e(sub)}</div></div>{right}</section>"
+            "<div class='cells'>" + "".join(f"<div><span class='k'>{_e(_caps(k))}</span><b>{_e(v)}</b></div>"
+                                            for k, v in cells if v) + "</div>")
+
+
+def _signoff(doc: DocumentInfo) -> str:
+    """A ruled schedule, one row per signatory: names, signatures and dates line up whatever is filled in."""
+    rows = "".join(f"<tr><td class='role'>{_e(p.role)}</td><td>{_e(p.name)}</td><td>{_e(p.position)}</td>"
+                   "<td class='sig'></td><td class='dt'></td></tr>" for p in doc.named_signatories())
+    return ("<table class='sign'><thead><tr><th>ROLE</th><th>NAME</th><th>POSITION</th><th>SIGNATURE</th>"
+            f"<th>DATE</th></tr></thead><tbody>{rows}</tbody></table>")
+
+
 # Rows of a report table that fit on one printed A4 page with the heading and
-# header row (13 px text, 12 mm margins). Longer tables are split at this size.
+# header row (8.5 pt text, 257 mm page area). Longer tables are split at this size.
 PRINT_ROWS_PER_PAGE = 30
 COMPACT_ROWS_PER_PAGE = 50  # .compact tables: 11 px text, tight rows
 
 
-def _table_block(title: str, head: str, rows: list[str], after: str = "", rows_per_page: int = PRINT_ROWS_PER_PAGE,
+def _continued(heading: str) -> str:
+    return heading.replace("</h2>", " <span class='cont'>(continued…)</span></h2>")
+
+
+def _table_block(heading: str, head: str, rows: list[str], after: str = "", rows_per_page: int = PRINT_ROWS_PER_PAGE,
                  css_class: str = "") -> str:
-    """A heading with its table, kept together in print.
+    """A heading (an <h2>, see _heading) with its table, kept together in print.
 
     head is the header row's cells; rows are complete <tr> elements. A table
     that fits on a page prints as one block. A longer one prints as
@@ -122,18 +288,17 @@ def _table_block(title: str, head: str, rows: list[str], after: str = "", rows_p
     """
     thead = f"<thead><tr>{head}</tr></thead>"
 
-    def block(heading: str, body: list[str], cls: str, tail: str) -> str:
-        return (f"<section class='block {cls} {css_class}'><h2>{heading}</h2><div class='table-wrap'><table>{thead}"
+    def block(h: str, body: list[str], cls: str, tail: str) -> str:
+        return (f"<section class='block {cls} {css_class}'>{h}<div class='table-wrap'><table>{thead}"
                 f"<tbody>{''.join(body)}</tbody></table></div>{tail}</section>")
 
     if len(rows) <= rows_per_page:
-        return block(title, rows, "", after)
+        return block(heading, rows, "", after)
     parts = [rows[i:i + rows_per_page] for i in range(0, len(rows), rows_per_page)]
-    out = [block(title, rows, "screen-only", after)]
+    out = [block(heading, rows, "screen-only", after)]
     for i, part in enumerate(parts):
-        heading = title if i == 0 else f"{title} <span class='cont'>(continued…)</span>"
         cls = "print-only" + (" page-break" if i else "")
-        out.append(block(heading, part, cls, after if i == len(parts) - 1 else ""))
+        out.append(block(heading if i == 0 else _continued(heading), part, cls, after if i == len(parts) - 1 else ""))
     return "".join(out)
 
 
@@ -158,38 +323,54 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
     xy_ds = [d for d in session.datasets if any(o.dataset_id == d.id and o.check is CheckKind.XY
                                                   for o in session.observations)]
     title = title or project_title(session)
-    out: list[str] = []
-    w = out.append
-
-    w(f"<title>RealityCheck report – {_e(title)}</title><style>{CSS}</style><main>")
-    w(f"<h1>RealityCheck QA/QC report<small>{_e(title)}</small></h1>")
-    w("<div class='meta'>")
-    w(f"<span>Generated</span><b>{datetime.now():%d %b %Y %H:%M}</b>")
-    w(f"<span>Control points</span><b>{_e(Path(session.control_path).name)} ({len(session.points)} points, "
-      f"{sum(p.enabled for p in session.points)} enabled)</b>")
-    if session.spots_path:
-        gone = len(session.spots_disregarded)
-        w(f"<span>Spot heights</span><b>{_e(Path(session.spots_path).name)} ({len(session.spots)} points"
-          f"{f', {gone} disregarded (more than {s.spot_max_outside:g} m outside the data)' if gone else ''}; "
-          "Z only)</b>")
-    for d in session.datasets:
-        w(f"<span>{KIND_LABEL[d.kind]}</span><b>{_e(Path(d.path).name)} <span class='muted'>· {_e(_crs_text(d))}</span></b>")
-    classes = s.cloud_classes
-    if any(d.kind is DatasetKind.CLOUD for d in session.datasets):
-        cls_txt = "all" if classes is None else ", ".join(f"{c} {CLASS_NAMES.get(c, '')}".strip() for c in classes)
-        w(f"<span>Cloud Z method</span><b>median of points within {s.cloud_radius:g} m; classes: {_e(cls_txt)}</b>")
+    generated = f"{datetime.now():%d %b %Y %H:%M}"
+    control = Path(session.control_path).name
     tol = []
     if s.tol_z is not None:
         tol.append(f"Z ±{s.tol_z * 1000:.0f} mm")
     if s.tol_xy is not None:
         tol.append(f"XY {s.tol_xy * 1000:.0f} mm")
-    w(f"<span>Tolerances</span><b>{', '.join(tol) or 'none set'}</b>")
-    w("</div>")
-    for m in warnings or []:
-        w(f"<div class='warn'>{_e(m)}</div>")
+    tol_text = ", ".join(tol) or "none set"
+    doc = s.document
+    numbers = itertools.count(1)
 
-    # Headline cards: checkpoints if roles are known, else all points.
-    w("<section class='block'><h2>Summary</h2><div class='cards'>")
+    def h2(text: str, note: str = "", cls: str = "") -> str:
+        return _heading(doc.heading_number(next(numbers)), text, note, cls)
+
+    out: list[str] = []
+    w = out.append
+
+    # In appendix mode the report is "Appendix B — <title>" and its sheets are B-1, B-2 …
+    heading_title = f"Appendix {doc.appendix.strip()} — {doc.appendix_title or title}" if doc.is_appendix else title
+    css = CSS + _page_css(doc, title, f"{heading_title} · RealityCheck QA/QC report", control, tol_text)
+    w(f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' "
+      f"content='width=device-width, initial-scale=1'><title>RealityCheck report – {_e(heading_title)}</title>"
+      f"<style>{css}</style></head><body><main>")
+
+    # Title block, the ruled cells under it, then the inputs as a schedule.
+    w(_title_block(doc, heading_title))
+    inputs = [("Control points", f"{_e(control)} ({len(session.points)} points, "
+                                 f"{sum(p.enabled for p in session.points)} enabled)")]
+    if session.spots_path:
+        gone = len(session.spots_disregarded)
+        inputs.append(("Spot heights", f"{_e(Path(session.spots_path).name)} ({len(session.spots)} points"
+                       f"{f', {gone} disregarded (more than {s.spot_max_outside:g} m outside the data)' if gone else ''}; "
+                       "Z only)"))
+    for d in session.datasets:
+        inputs.append((KIND_LABEL[d.kind], f"{_e(Path(d.path).name)} <span class='muted'>· {_e(_crs_text(d))}</span>"))
+    classes = s.cloud_classes
+    if any(d.kind is DatasetKind.CLOUD for d in session.datasets):
+        cls_txt = "all" if classes is None else ", ".join(f"{c} {CLASS_NAMES.get(c, '')}".strip() for c in classes)
+        inputs.append(("Cloud Z method", f"median of points within {s.cloud_radius:g} m; classes: {_e(cls_txt)}"))
+    inputs.append(("Tolerances", _e(tol_text)))
+    inputs.append(("Generated", f"{generated} · RealityCheck {__version__}"))
+    w("<table class='inputs'><tbody>" + "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in inputs)
+      + "</tbody></table>")
+    for m in warnings or []:
+        w(f"<div class='warn'><span class='k'>NOTE</span>{_e(m)}</div>")
+
+    # Headline results: checkpoints if roles are known, else all points. A PASS / FAIL stamp when tolerances are set.
+    cells, verdicts = [], []
     for d in session.datasets:
         for comp, label, tolv in (("dz", "Z", s.tol_z), ("dxy", "XY", s.tol_xy)):
             rows = [r for r in summary if r.dataset_id == d.id and r.component == comp]
@@ -199,13 +380,30 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
             st = row.stats
             verdict = ""
             if tolv is not None:
-                verdict = f"<span class='{'pass' if st.rmse <= tolv else 'fail'}'>{'PASS' if st.rmse <= tolv else 'FAIL'}</span>"
+                ok = st.rmse <= tolv
+                verdicts.append(ok)
+                verdict = (f"<span class='{'ok' if ok else 'nc'}'>{'Pass' if ok else 'Fail'}</span>"
+                           f" (tolerance {tolv * 1000:.0f} mm) · ")
             group = "checkpoints" if row.group == "checkpoint" else "all points"
             bias = f"bias {_mm(st.mean)} mm · " if comp == "dz" else ""
-            w(f"<div class='card'><div class='k'>{KIND_LABEL[d.kind]} {label} RMSE · {group} (n={st.n})</div>"
-              f"<div class='v'>{_mm(st.rmse, False)} <small>mm</small> {verdict}</div>"
-              f"<div class='k'>{bias}SD {_mm(st.sd, False)} mm</div></div>")
-    w("</div>")
+            cells.append(f"<div><span class='k'>{_e(_caps(f'{KIND_LABEL[d.kind]} {label} RMSE · {group}'))} · n = {st.n}"
+                         f"</span><div class='v'>{_mm(st.rmse, False)} <small>mm</small></div>"
+                         f"<div class='sm'>{verdict}{bias}SD {_mm(st.sd, False)} mm</div></div>")
+    w(f"<section class='block'>{h2('Summary', 'RESIDUAL = DATASET − SURVEYED POINT')}")
+    if cells:
+        cols = min(len(cells), 4)
+        rows_n = -(-len(cells) // cols)
+        spare = cols * rows_n - len(cells)
+        if spare:  # the last cell fills the row, so no ink shows through the ruling
+            cells[-1] = cells[-1].replace("<div>", f"<div style='grid-column:span {spare + 1}'>", 1)
+        template = f"repeat({cols}, minmax(0, 1fr))"
+        if verdicts:
+            passed = all(verdicts)
+            cells.insert(0, f"<div class='res' style='grid-row:span {rows_n}'><span class='k'>RESULT</span><span>"
+                            f"<span class='stamp{'' if passed else ' fail'}'>{'PASS' if passed else 'FAIL'}</span></span>"
+                            f"<span class='sm'>{sum(verdicts)} of {len(verdicts)} tolerances met</span></div>")
+            template = "30mm " + template
+        w(f"<div class='sched' style='grid-template-columns:{template}'>{''.join(cells)}</div>")
     offsets = z_offsets(session.points, session.observations, s.trim)
     spot_offsets = z_offsets(session.spots, session.spot_observations, s.trim, spots=True)
     if offsets or spot_offsets:
@@ -223,10 +421,13 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
     if overview.layout.strips > 1:
         caption += (" The site is long and narrow, so it is cut into numbered strips at one scale, "
                     "in the order stated under the map.")
+    overview_heading = h2("Site overview", "dZ COLOURS: DARK = SURFACE LOW, LIGHT = HIGH")
+    if overview.left_out:
+        caption += (f" Not on the map, as no dataset has data there: {_e(', '.join(overview.left_out))}.")
     for i, sheet in enumerate(overview.sheets):
-        heading = "Site overview" + (" <span class='cont'>(continued…)</span>" if i else "")
+        heading = _continued(overview_heading) if i else overview_heading
         # Printed at the size it was drawn, so text keeps its size on paper.
-        w(f"<section class='block{' page-break' if i else ''}'><h2>{heading}</h2><figure class='overview'>"
+        w(f"<section class='block{' page-break' if i else ''}'>{heading}<figure class='overview'>"
           f"<img style='--w:{sheet.width / PX_PER_MM:.1f}mm' src='{to_data_url(sheet, 'JPEG')}' "
           f"alt='Site overview with control points'>"
           f"{f'<figcaption>{caption}</figcaption>' if i == len(overview.sheets) - 1 else ''}</figure></section>")
@@ -240,9 +441,9 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
             f"<td class='n'>{_mm(st.sd, False)}</td><td class='n'>{_mm(st.rmse, False)}</td>"
             f"<td class='n'>{_mm(max(abs(st.min), abs(st.max)), False)}</td></tr>")
     w(_table_block(
-        "Statistics",
-        "<th>Dataset</th><th>Component</th><th>Points</th><th class='n'>n</th><th class='n'>Bias (mean)</th>"
-        "<th class='n'>SD</th><th class='n'>RMSE</th><th class='n'>Max |residual|</th>",
+        h2("Statistics", "ALL VALUES IN mm"),
+        "<th>DATASET</th><th>COMPONENT</th><th>POINTS</th><th class='n'>n</th><th class='n'>BIAS (MEAN)</th>"
+        "<th class='n'>SD</th><th class='n'>RMSE</th><th class='n'>MAX |RESIDUAL|</th>",
         stat_rows,
         after="<p class='note'>All values in mm. Residual = dataset minus surveyed point. "
               "Bias is the mean residual (a systematic offset). RMSE combines bias and scatter (RMSE² ≈ bias² + SD²). "
@@ -250,15 +451,15 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
               "accuracy figure.</p>"))
 
     issues = _issues(session, results, ds_by_id)
-    body = ("<ul class='issues'>" + "".join(f"<li>{i}</li>" for i in issues) + "</ul>") if issues \
-        else "<p class='muted'>None.</p>"
-    w(f"<section class='block'><h2>Items to review</h2>{body}</section>")
+    body = ("<ol class='gn'>" + "".join(f"<li>{i}</li>" for i in issues) + "</ol>") if issues \
+        else "<p class='note'>None.</p>"
+    w(f"<section class='block'>{h2('Items to review', 'NC = NONCONFORMANCE · CHECK = LOOK AT IT')}{body}</section>")
 
     # Point table
-    head = "<th>Point</th><th>Role</th>"
-    head += "".join(f"<th class='n'>dZ {KIND_LABEL[d.kind].lower()}</th>" for d in z_ds)
-    head += "".join(f"<th class='n'>dXY {KIND_LABEL[d.kind].lower()}</th>" for d in xy_ds)
-    head += "<th>Flags</th>"
+    head = "<th>POINT</th><th>ROLE</th>"
+    head += "".join(f"<th class='n'>dZ {_caps(KIND_LABEL[d.kind])}</th>" for d in z_ds)
+    head += "".join(f"<th class='n'>dXY {_caps(KIND_LABEL[d.kind])}</th>" for d in xy_ds)
+    head += "<th>FLAGS</th>"
     point_rows = []
     for pr in results:
         cp = pr.point
@@ -273,24 +474,27 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
             cells.append(f"<td class='n {_tol_class(v, s.tol_xy, False)}'>{txt}</td>")
         cells.append(f"<td>{_flags(pr)}</td>")
         point_rows.append("<tr>" + "".join(cells) + "</tr>")
-    w(_table_block("Control points", head, point_rows))
+    w(_table_block(h2("Control points", "RESIDUALS IN mm"), head, point_rows))
 
     if z_ds:
-        w(_table_block("Z comparison", *_z_table(session, results, z_ds, offsets)))
+        w(_table_block(h2("Z comparison", "dZ = SURFACE − CONTROL"), *_z_table(session, results, z_ds, offsets)))
     if z_ds and session.spots:
-        w(_table_block("Spot heights", *_spot_table(session, z_ds, spot_offsets), rows_per_page=COMPACT_ROWS_PER_PAGE,
-                       css_class="compact"))
+        w(_table_block(h2("Spot heights", "dZ = SURFACE − SPOT HEIGHT"), *_spot_table(session, z_ds, spot_offsets),
+                       rows_per_page=COMPACT_ROWS_PER_PAGE, css_class="compact"))
+
+    if doc.named_signatories():
+        w(f"<section class='block'>{h2('Sign-off')}{_signoff(doc)}</section>")
 
     # Point pages
-    w("<h2 class='page-break'>Point details</h2>")
     size = s.report_chip_size
+    w(h2("Point details", f"CHIPS {size:g} m WIDE", "page-break"))
     for pr in results:
         cp = pr.point
         w(f"<section class='point{'' if cp.enabled else ' disabled'}' id='pt-{_e(cp.id)}'><header>"
           f"<h3>{_e(cp.id)}</h3>{_role_tag(cp.role)}{_flags(pr)}"
-          f"<span class='coords'>E {cp.x:.3f} · N {cp.y:.3f} · Z {cp.z:.3f}</span></header>")
-        w("<table><thead><tr><th>Dataset</th><th>Check</th><th class='n'>dX</th><th class='n'>dY</th>"
-          "<th class='n'>dXY</th><th class='n'>dZ</th><th>Result</th></tr></thead><tbody>")
+          f"<span class='coords'>E {cp.x:.3f} · N {cp.y:.3f} · Z {cp.z:.3f}</span></header><div class='body'>")
+        w("<table><thead><tr><th>DATASET</th><th>CHECK</th><th class='n'>dX</th><th class='n'>dY</th>"
+          "<th class='n'>dXY</th><th class='n'>dZ</th><th>RESULT</th></tr></thead><tbody>")
         order = {d.id: i for i, d in enumerate(session.datasets)}
         for (ds_id, check), o in sorted(pr.status.items(), key=lambda kv: (order[kv[0][0]], kv[0][1].value)):
             kind = KIND_LABEL[ds_by_id[ds_id].kind]
@@ -310,17 +514,18 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
         w("</div>")
         if cp.note:
             w(f"<p class='note'>{_e(cp.note)}</p>")
-        w("</section>")
+        w("</div></section>")
 
-    w(f"<p class='note'>RealityCheck {__version__} · QA/QC for photogrammetry and LiDAR</p></main>")
+    w(f"<p class='gen'>Generated by RealityCheck {__version__} (Plumb) · QA/QC for photogrammetry and LiDAR</p>"
+      "</main></body></html>")
     return "".join(out)
 
 
 def _z_table(session: Session, results, z_ds, offsets) -> tuple[str, list[str], str]:
     """Control Z against each surface's Z, point by point, with the mean offset at the foot."""
     tol = session.settings.tol_z
-    head = "<th>Point</th><th>Role</th><th class='n'>Control Z</th>"
-    head += "".join(f"<th class='n'>{KIND_LABEL[d.kind]} Z</th><th class='n'>dZ</th><th></th>" for d in z_ds)
+    head = "<th>POINT</th><th>ROLE</th><th class='n'>CONTROL Z</th>"
+    head += "".join(f"<th class='n'>{_caps(KIND_LABEL[d.kind])} Z</th><th class='n'>dZ</th><th></th>" for d in z_ds)
     rows = []
     for pr in results:
         cp = pr.point
@@ -352,8 +557,8 @@ def _spot_table(session: Session, z_ds, offsets) -> tuple[str, list[str], str]:
     """Spot heights: compact, dZ only. Supporting evidence for a shift or a reprocess."""
     star = "*" if session.settings.trim > 0 else ""
     obs = {(o.point_id, o.dataset_id): o for o in session.spot_observations if o.check is CheckKind.Z}
-    head = "<th>Spot</th><th class='n'>Z</th>" + "".join(
-        f"<th class='n'>dZ {KIND_LABEL[d.kind].lower()}</th>" for d in z_ds)
+    head = "<th>SPOT</th><th class='n'>Z</th>" + "".join(
+        f"<th class='n'>dZ {_caps(KIND_LABEL[d.kind])}</th>" for d in z_ds)
     rows = []
     for p in session.spots:
         if not p.enabled:  # disregarded: listed after the table
@@ -432,14 +637,18 @@ def _flags(pr) -> str:
     if not cp.enabled:
         tags.append("<span class='tag'>disabled</span>")
     if cp.needs_touch_up:
-        tags.append("<span class='tag amber'>needs touch-up</span>")
+        tags.append("<span class='tag'>needs touch-up</span>")
     if pr.manual:
-        tags.append("<span class='tag blue'>manual</span>")
-    if any(o.status is ObsStatus.NOT_FOUND for o in pr.status.values()):
-        tags.append("<span class='tag red'>not found</span>")
+        tags.append("<span class='tag'>manual</span>")
+    if any(o.status is ObsStatus.NOT_FOUND for o in pr.status.values()):  # red: nonconformance
+        tags.append("<span class='tag nc'>not found</span>")
     if cp.enabled and pr.exceeds:
-        tags.append("<span class='tag red'>exceeds tolerance</span>")
+        tags.append("<span class='tag nc'>exceeds tolerance</span>")
     return "".join(tags)
+
+
+NC_TAG = "<span class='tag nc'>NC</span>"  # nonconformance: the only red in the report
+CHECK_TAG = "<span class='tag'>CHECK</span>"
 
 
 def _issues(session: Session, results, ds_by_id) -> list[str]:
@@ -451,19 +660,20 @@ def _issues(session: Session, results, ds_by_id) -> list[str]:
             out.append(f"{pid} is disabled and excluded from statistics." + (f" Note: {_e(cp.note)}" if cp.note else ""))
             continue
         for e in pr.exceeds:
-            out.append(f"{pid}: {_e(e)} exceeds tolerance.")
+            out.append(f"{pid}: {_e(e)} exceeds tolerance.{NC_TAG}")
         for (ds_id, check), o in pr.status.items():
             name = KIND_LABEL[ds_by_id[ds_id].kind].lower()
             if o.status is ObsStatus.NOT_FOUND:
-                out.append(f"{pid}: target not found in the {name}.")
+                out.append(f"{pid}: target not found in the {name}.{NC_TAG}")
             elif o.status is ObsStatus.OUT_OF_EXTENT:
                 out.append(f"{pid}: outside the {name}.")
             elif o.status is ObsStatus.NO_DATA:
-                out.append(f"{pid}: no data in the {name} at this point.")
+                out.append(f"{pid}: no data in the {name} at this point.{CHECK_TAG}")
         if cp.needs_touch_up:
-            out.append(f"{pid}: target needs a touch-up in the field.")
+            out.append(f"{pid}: target needs a touch-up in the field.{CHECK_TAG}")
     if all(p.role is Role.UNKNOWN for p in session.points):
-        out.append("GCP / checkpoint roles are not set. Statistics mix GCPs (used in processing) and independent checkpoints.")
+        out.append("GCP / checkpoint roles are not set. Statistics mix GCPs (used in processing) and independent "
+                   f"checkpoints.{CHECK_TAG}")
     return out
 
 

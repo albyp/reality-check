@@ -112,6 +112,20 @@ or on the Settings tab. Its `defaults`:
 | `trim` | `0.1` | Average offsets: fraction of dZ values left out, half from each end. `0.1` = 90% trimmed mean (Excel `TRIMMEAN(…, 0.1)`); `0` = plain mean |
 | `spot_max_outside` | `10.0` | Spot heights further than this (metres) from all DEM and cloud data are disregarded and listed |
 
+### Report document details
+
+Under **Document details** on the Report tab: project, site, client, job
+number, document number, revision, issue date (blank = today), author,
+subtitle, company, confidentiality, company and client logos (PNG, JPG, SVG,
+GIF or WebP up to 2 MB, embedded in the report), an appendix letter
+(the report becomes "Appendix B", sections B1 …, sheets B-1 …) and the
+sign-off (rows with a name or position become the sign-off table). They fill
+the title block on the first page and the title strip on every sheet, and are
+saved with the session. *Save company details as defaults* stores the
+company, author, company logo, confidentiality, title strip note and
+sign-off under `document` in `settings.json`; new runs and batches start
+from them.
+
 ### Batch
 
 The **Batch** tab runs many projects with one template: drag project folders
@@ -163,7 +177,10 @@ reality-check crs list
 Options: `--title`, `--pdf`, `--csv`, `--spots FILE` (spot heights),
 `--trim` (default 0.1), `--spot-max-outside` (default 10 m), `--radius` (cloud Z search radius,
 default 0.5 m), `--classes 2,11`, `--tol-z`, `--tol-xy`, `--chip-size`,
-`--control-crs NAME` (control points in a local grid from the CRS library).
+`--control-crs NAME` (control points in a local grid from the CRS library),
+`--document FILE` (report document details as JSON, with the keys of
+`document` in a session file, e.g. `{"client": "…", "document_number": "…",
+"signatories": [{"role": "Prepared by", "name": "…"}]}`).
 
 ## Development (Windows)
 

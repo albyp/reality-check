@@ -11,12 +11,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from reality_check import __version__
 from reality_check.cloud import CLASS_NAMES, is_classified, sample_windows
 from reality_check.crs import CRSLibrary
+from reality_check.document import DocumentInfo
 from reality_check.export import write_residuals, write_summary
 from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
@@ -53,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--tol-z", type=float, default=None, help="Z tolerance in metres, e.g. 0.05")
     r.add_argument("--tol-xy", type=float, default=None, help="XY tolerance in metres, e.g. 0.05")
     r.add_argument("--chip-size", type=float, default=2.0, help="report chip width in metres (default 2)")
+    r.add_argument("--document", default=None,
+                   help="JSON file of report document details (client, document number, logos, signatories…)")
     r.add_argument("--pdf", action="store_true", help="also write report.pdf")
     r.add_argument("--csv", action="store_true", help="also write residuals.csv and summary.csv")
 
@@ -97,6 +101,8 @@ def cmd_run(a) -> int:
         tol_z=a.tol_z, tol_xy=a.tol_xy, report_chip_size=a.chip_size, trim=a.trim,
         spot_max_outside=a.spot_max_outside,
     )
+    if a.document:
+        settings.document = DocumentInfo.from_dict(json.loads(Path(a.document).read_text(encoding="utf-8")))
     a.out.mkdir(parents=True, exist_ok=True)
     result = run(a.control, datasets, settings, spots_path=a.spots)
     s = result.session
@@ -159,7 +165,7 @@ def cmd_crs(a) -> int:
 def _settings_from_defaults(app, tol_z=None, tol_xy=None) -> Settings:
     d = app.defaults
     return Settings(cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size, trim=d.trim,
-                    spot_max_outside=d.spot_max_outside,
+                    spot_max_outside=d.spot_max_outside, document=app.document.copy(),
                     tol_z=d.tol_z if tol_z is None else tol_z, tol_xy=d.tol_xy if tol_xy is None else tol_xy)
 
 

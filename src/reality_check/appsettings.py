@@ -1,6 +1,7 @@
 """Application settings: settings.json next to the executable.
 
-Holds default values for new runs and the project templates. The file is
+Holds default values for new runs, the company details for the report title
+block and the project templates. The file is
 created on first use with the built-in templates, so it can be edited in the
 app (Settings tab) or by hand.
 
@@ -20,6 +21,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from reality_check.document import DocumentInfo
 from reality_check.templates import Template, builtin_templates
 
 FILE_NAME = "settings.json"
@@ -42,6 +44,7 @@ class AppSettings:
     defaults: Defaults = field(default_factory=Defaults)
     default_template: str = "Project root"
     templates: list[Template] = field(default_factory=builtin_templates)
+    document: DocumentInfo = field(default_factory=DocumentInfo)  # company details every new report starts with
 
     def template(self, name: str) -> Template | None:
         return next((t for t in self.templates if t.name == name), None)
@@ -88,6 +91,7 @@ class AppSettings:
             "defaults": asdict(self.defaults),
             "default_template": self.default_template,
             "templates": [t.to_dict() for t in self.templates],
+            "document": self.document.company_defaults().to_dict(),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
@@ -153,7 +157,8 @@ def load(path: Path | None = None) -> AppSettings:
     known = Defaults.__dataclass_fields__
     defaults = Defaults(**{k: v for k, v in d.get("defaults", {}).items() if k in known})
     templates = [_upgrade(t) for t in d.get("templates", [])] or builtin_templates()
-    return AppSettings(path, defaults, d.get("default_template", templates[0].name), templates)
+    document = DocumentInfo.from_dict(d.get("document")).company_defaults()
+    return AppSettings(path, defaults, d.get("default_template", templates[0].name), templates, document)
 
 
 def _upgrade(raw: dict) -> Template:

@@ -9,7 +9,7 @@ Legends give the ground scale, the ellipse exaggeration and the dZ colours.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import rasterio
@@ -26,7 +26,7 @@ MARGIN = 0.04  # fraction of the extent added around the control points
 # The overview is drawn at its printed size, so text and symbols are the same
 # size on paper however large or oddly shaped the site is.
 SHEET_W_MM = 186.0  # A4 width inside 12 mm margins
-SHEET_H_MM = 235.0  # A4 height left for the figure after its heading and caption
+SHEET_H_MM = 220.0  # A4 page area (257 mm inside the title strip) left for the figure after its heading and caption
 PX_PER_MM = 8  # about 200 dpi
 TEXT_MM = 2.6  # labels and legend, about 7.5 pt
 MARKER_MM = 1.1  # point symbol radius
@@ -39,14 +39,17 @@ MAX_SHEETS = 6
 MIN_SPACING_MM = 6.0  # typical gap between neighbouring points on paper before more sheets are used
 KEY_MIN_PX = 40  # narrowest key map worth drawing
 PAPER = (255, 255, 255)  # outside the imagery: white, so a printed report uses no ink there
-DZ_NEG = np.array([33, 102, 172], float)  # surface below surveyed
-DZ_MID = np.array([247, 247, 247], float)
-DZ_POS = np.array([178, 24, 43], float)  # surface above surveyed
+# dZ ramp, low (surface below surveyed) to high: navy, slate, grey, sand, cream. Lightness rises end to end,
+# so it still reads as an ordered grey scale on a black-and-white copy (Plumb house style, as CounterCheck).
+DZ_RAMP = np.array([[20, 35, 63], [63, 101, 147], [169, 180, 184], [230, 194, 122], [251, 240, 214]], dtype=float)
+NC_RED = (200, 16, 46)  # nonconformance only: target not found
 
 
 def dz_colour(dz: float, limit: float) -> tuple[int, int, int]:
     t = max(-1.0, min(1.0, dz / limit)) if limit > 0 else 0.0
-    c = DZ_MID + (DZ_POS - DZ_MID) * t if t >= 0 else DZ_MID + (DZ_NEG - DZ_MID) * -t
+    x = (t + 1) / 2 * (len(DZ_RAMP) - 1)
+    i = min(int(x), len(DZ_RAMP) - 2)
+    c = DZ_RAMP[i] + (DZ_RAMP[i + 1] - DZ_RAMP[i]) * (x - i)
     return tuple(int(v) for v in c)
 
 
@@ -125,6 +128,7 @@ class Layout:
 class Overview:
     sheets: list[Image.Image]
     layout: Layout
+    left_out: list[str] = field(default_factory=list)  # points outside all the data: not drawn, not in the extent
 
 
 def _median_spacing(xs: np.ndarray, ys: np.ndarray) -> float:
@@ -189,9 +193,15 @@ def plan_layout(xs: np.ndarray, ys: np.ndarray, legend_mm: float) -> Layout:
 
 
 def render_overview(session: Session) -> Overview:
-    """The overview as one image per printed sheet, drawn at print size."""
-    results = point_results(session)
-    pts = session.points
+    """The overview as one image per printed sheet, drawn at print size.
+
+    Points that no dataset has data for are left off, so a stray point far from the site does not shrink the
+    map to fit it in.
+    """
+    every = point_results(session)
+    results = [pr for pr in every if not pr.outside_data] or every  # all outside: show them rather than nothing
+    left_out = [pr.point.id for pr in every if pr.outside_data] if results is not every else []
+    pts = [pr.point for pr in results]
     font = _font(round(TEXT_MM * PX_PER_MM))
     sheet_w = round(SHEET_W_MM * PX_PER_MM)
     if not pts:
@@ -243,7 +253,7 @@ def render_overview(session: Session) -> Overview:
         _legend(out, map_h, mpp, factor, dz_limit, source, xy_ds, z_ds, bool(dxys), font,
                 layout if k > 1 else None, (first, last), xs, ys)
         sheets.append(out)
-    return Overview(sheets, layout)
+    return Overview(sheets, layout, left_out)
 
 
 def _strip_label(img: Image.Image, x: int, y: int, size: tuple[int, int], number: int, font) -> None:
@@ -273,7 +283,8 @@ def _tile(session, results, bounds, width, height, mpp, xy_ds, z_ds, dz_limit, f
         if not (0 <= px < width and 0 <= py < height):  # the next strip shows it; strips overlap
             continue
         dz = pr.dz.get(z_ds.id) if z_ds else None
-        fill = dz_colour(dz, dz_limit) + (220,) if dz is not None and cp.enabled else (160, 160, 160, 200)
+        # Disabled points are hollow, so they cannot be read as the grey middle of the dZ ramp.
+        fill = dz_colour(dz, dz_limit) + (220,) if dz is not None and cp.enabled else (255, 255, 255, 120)
         outline = (20, 20, 20, 255) if cp.enabled else (110, 110, 110, 255)
         dx = pr.dx.get(xy_ds.id) if xy_ds else None
         dy = pr.dy.get(xy_ds.id) if xy_ds else None
@@ -290,8 +301,8 @@ def _tile(session, results, bounds, width, height, mpp, xy_ds, z_ds, dz_limit, f
                          width=2)
         if xy_obs is not None and xy_obs.status is ObsStatus.NOT_FOUND:
             k = r_marker + 3
-            draw.line([(px - k, py - k), (px + k, py + k)], fill=(200, 0, 0, 255), width=3)
-            draw.line([(px - k, py + k), (px + k, py - k)], fill=(200, 0, 0, 255), width=3)
+            draw.line([(px - k, py - k), (px + k, py + k)], fill=NC_RED + (255,), width=3)
+            draw.line([(px - k, py + k), (px + k, py - k)], fill=NC_RED + (255,), width=3)
         label = cp.id + ("" if cp.enabled else " (off)")
         draw.text((px + r_marker + 4, py - r_marker - 2), label, fill=(255, 255, 255, 255), font=font,
                   stroke_width=3, stroke_fill=(0, 0, 0, 255))
@@ -358,12 +369,12 @@ def _legend(img, map_h, mpp, factor, dz_limit, source, xy_ds, z_ds, has_xy, font
         src.append(f"XY: {_kind(xy_ds)}")
     draw.text((x, y), " · ".join(src), fill=(70, 70, 70, 255), font=font)
     y += line_h
-    draw.text((x, y), "Grey = disabled · red X = target not found", fill=(70, 70, 70, 255), font=font)
+    draw.text((x, y), "Hollow = disabled or no dZ · red X = target not found", fill=(70, 70, 70, 255), font=font)
     if layout is not None:
         y += line_h
         order = "north to south, left to right" if layout.tall else "west to east, top to bottom"
         first, last = shown
-        part = f"strip {first}" if first == last else f"strips {first} to {last}"  # the font has no en dash
+        part = f"strip {first}" if first == last else f"strips {first} to {last}"
         draw.text((x, y), f"{part[0].upper()}{part[1:]} of {layout.strips}, {order}; one scale, "
                           "slight overlap at joins", fill=(70, 70, 70, 255), font=font)
 
@@ -386,7 +397,7 @@ def _key_map(draw, layout: Layout, shown, xs, ys, right: float, top: float, heig
     first, last = shown
     for i, b in enumerate(layout.tiles, start=1):
         (ax, ay), (bx, by) = to_px(b[0], b[3]), to_px(b[2], b[1])
-        fill = (31, 122, 140, 70) if first <= i <= last else None
+        fill = (17, 17, 17, 50) if first <= i <= last else None  # this sheet's strips: ink tint
         draw.rectangle([ax, ay, bx, by], fill=fill, outline=(60, 60, 60, 255), width=1)
         label = str(i)
         tw = draw.textlength(label, font=font)

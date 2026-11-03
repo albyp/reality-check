@@ -15,7 +15,7 @@ import gc
 import logging
 import os
 import queue
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from nicegui import app, run, ui
@@ -24,6 +24,7 @@ from reality_check import __version__, appsettings, windialogs
 from reality_check.batch import BatchOptions, BatchResult, plan, run_one
 from reality_check.cloud import CLASS_NAMES, Chunk, is_classified
 from reality_check.detect import detect
+from reality_check.document import SIGN_ROLES, DocumentInfo, Signatory
 from reality_check.export import write_residuals, write_summary
 from reality_check.models import CheckKind, DatasetKind, ObsSource, ObsStatus, Role
 from reality_check.pipeline import check_crs, load_windows, make_datasets
@@ -31,6 +32,7 @@ from reality_check.pipeline import run as run_pipeline
 from reality_check.render import ChipRenderer
 from reality_check.report import KIND_LABEL, build_html, write_pdf
 from reality_check.review import (
+    disable_outside_data,
     find_obs,
     point_results,
     recompute_cloud_z,
@@ -46,6 +48,7 @@ from reality_check.templates import (
     Resolution,
     RoleRule,
     Template,
+    builtin_templates,
     matching_folders,
     resolve,
 )
@@ -112,7 +115,7 @@ def app_settings() -> appsettings.AppSettings:
 def _default_settings() -> Settings:
     d = app_settings().defaults
     return Settings(tol_z=d.tol_z, tol_xy=d.tol_xy, cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size,
-                    trim=d.trim, spot_max_outside=d.spot_max_outside)
+                    trim=d.trim, spot_max_outside=d.spot_max_outside, document=app_settings().document.copy())
 
 
 def _template_names() -> list[str]:
@@ -282,49 +285,115 @@ async def confirm_clear() -> None:
     if S.busy:
         ui.notify("Wait for the run to finish first.", type="warning")
         return
-    if S.dirty:
-        with ui.dialog() as dialog, ui.card():
-            ui.label("Clear without saving?").classes("text-h6")
-            ui.label("The review work in this session has not been saved.").classes("text-body2")
-            with ui.row().classes("w-full justify-end"):
-                ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat")
-                ui.button("Clear", on_click=lambda: dialog.submit(True)).props("color=negative")
-        if not await dialog:
-            return
+    if S.dirty and not await confirm("Clear without saving?", "The review work in this session has not been saved.",
+                                     "Clear"):
+        return
     clear_all()
     ui.navigate.reload()
 
 
+async def confirm(title: str, text: str, action: str) -> bool:
+    """Ask before a destructive action. Ink, not red: red is kept for nonconformance (house style).
+
+    The safety is the question itself: it says what is lost, Cancel comes first, and the action button
+    repeats the verb rather than saying OK.
+    """
+    with ui.dialog() as dialog, ui.card().classes("q-pa-md"):
+        ui.label(title).classes("text-h6")
+        ui.label(text).classes("text-body2")
+        with ui.row().classes("w-full justify-end q-mt-sm"):
+            ui.button("Cancel", on_click=lambda: dialog.submit(False)).props("flat autofocus")
+            ui.button(action, on_click=lambda: dialog.submit(True)).props("unelevated")
+    return bool(await dialog)
+
+
 # ---------- page ----------
+
+# Plumb house style ("Drawing Sheet", as CounterCheck): DIN lettering (Bahnschrift), ink only, square corners,
+# 1 px ink rules instead of shadows, black inverse for the selection. Red is for nonconformance and destructive
+# actions only. Bahnschrift has no ✓, ✗, ±, ▲ or ▼, so those come from Segoe UI.
+_HOUSE_CSS = """
+<style>
+@font-face { font-family:"Plumb Symbols"; src:local("Segoe UI Symbol"), local("Segoe UI"), local("Arial");
+             unicode-range:U+00B1, U+00B2, U+00B3, U+00D7, U+2026, U+2212, U+2248, U+2713, U+2717, U+25B2, U+25BC; }
+:root { --rc-ink:#111111; --rc-mid:#5a5a57; --rc-hair:#b9b8b2; --rc-chrome:#e7e6e1; }
+body, .q-field, .q-btn, .q-tab, .q-table, .q-notification, .q-menu, .q-item {
+  font-family:"Plumb Symbols", "Bahnschrift", "DIN Alternate", "Arial Narrow", Arial, sans-serif; }
+body { background:var(--rc-chrome); font-variant-numeric:tabular-nums; }
+.q-btn, .q-card, .q-field, .q-field__control, .q-field--outlined .q-field__control:before, .q-menu, .q-dialog__inner > div,
+.q-notification, .q-badge, .q-table__container, .q-tab__indicator, .rounded-borders { border-radius:0 !important; }
+.q-btn { letter-spacing:.06em; }
+.q-btn:before { box-shadow:none !important; }
+.q-card { box-shadow:none !important; border:1px solid var(--rc-ink); }
+.q-table__card, .q-table--bordered { box-shadow:none !important; border-color:var(--rc-ink); }
+.q-table th { font-family:"Bahnschrift SemiCondensed", "Bahnschrift", sans-serif; font-weight:600; letter-spacing:.08em;
+              text-transform:uppercase; border-bottom:1px solid var(--rc-ink); }
+.q-tab { letter-spacing:.08em; }
+.q-tab__indicator { height:2px; }
+.q-header { border-bottom:1px solid var(--rc-ink); }
+.q-footer { border-top:1px solid var(--rc-ink); }
+.q-tabs { border-bottom:1px solid var(--rc-ink); }
+.text-h6 { font-weight:600; letter-spacing:.06em; }
+.text-subtitle1 { font-weight:600 !important; letter-spacing:.12em; text-transform:uppercase; font-size:12px; }
+.rc-mark { width:16px; height:16px; border:1.5px solid var(--rc-ink); position:relative; }
+.rc-mark::after { content:""; position:absolute; left:6px; top:-1px; width:1.5px; height:12px; background:var(--rc-ink); }
+.rc-mark::before { content:""; position:absolute; left:3.5px; top:9px; width:6px; height:6px; background:var(--rc-ink);
+                   transform:rotate(45deg); }
+.rc-status { font-size:11px; letter-spacing:.06em; color:var(--rc-mid); }
+.rc-drop { border:1.5px dashed var(--rc-ink); background:#fff; }
+</style>
+"""
+
 
 @ui.page("/")
 def index() -> None:
-    ui.colors(primary="#0b6e79")
+    ui.colors(primary="#111111", secondary="#5a5a57", accent="#111111", positive="#111111", negative="#c8102e",
+              info="#5a5a57", warning="#5a5a57")
+    ui.add_head_html(_HOUSE_CSS)
     ui.add_body_html(_DROP_JS)
     ui.add_css("""
         .rc-chip img { image-rendering: auto; }
         .q-table td, .q-table th { padding: 4px 8px; }
-        .rc-sel { background: #e3f2f4 !important; }
+        .rc-sel { background: #111111 !important; color: #ffffff; }
     """)
 
-    with ui.header().classes("items-center bg-white text-black shadow-1 q-px-md"):
-        with ui.column().classes("gap-0"):
-            ui.label("RealityCheck").classes("text-h6 text-weight-bold")
-            ui.label("QA/QC for photogrammetry and LiDAR").classes("text-caption text-grey-7")
+    with ui.header().classes("items-center bg-white text-black q-px-md q-py-sm"):
+        ui.element("div").classes("rc-mark q-mr-sm")
+        ui.label("REALITYCHECK").classes("text-weight-bold").style("letter-spacing:.08em")
+        ui.label("QA/QC for photogrammetry and LiDAR").classes("text-caption text-grey-7")
         ui.space()
         ui.button("Open session", icon="folder_open", on_click=lambda: open_session()).props("flat")
         ui.button("Save session", icon="save", on_click=lambda: save_session()).props("flat")
 
+    with ui.footer().classes("bg-white text-black q-px-md q-py-xs items-center rc-status"):
+        status_session = ui.label().classes("rc-status")
+        ui.space()
+        status_saved = ui.label().classes("rc-status")
+        ui.label(f"PLUMB REALITYCHECK {__version__}").classes("rc-status q-ml-lg")
+
+    def update_status() -> None:
+        if S.session is None:
+            status_session.set_text("NO SESSION · run the checks on the Setup tab")
+            status_saved.set_text("")
+            return
+        name = S.session_path.name if S.session_path else "session not saved yet"
+        n = len(S.session.points)
+        status_session.set_text(f"{name} · {n} control points · {len(S.session.datasets)} datasets")
+        status_saved.set_text("UNSAVED CHANGES" if S.dirty else "SAVED" if S.session_path else "")
+
+    update_status()
+    ui.timer(1.0, update_status)
+
     app_settings()
     if S.fallback_reason:
-        with ui.card().classes("w-full q-pa-sm").style("background:#fff8e8; border:1px solid #f0d49a"):
+        with ui.card().classes("w-full q-pa-sm"):
             ui.label("RealityCheck could not open its own window on this computer, so it is running in your "
                      "browser. Everything works except drag and drop: use the Browse buttons, or paste a path.").classes(
                 "text-body2")
             ui.label("To get the desktop window, install the Microsoft Edge WebView2 Runtime "
                      "(https://developer.microsoft.com/microsoft-edge/webview2/), then restart RealityCheck. "
                      f"Reason: {S.fallback_reason}").classes("text-caption text-grey-8")
-    with ui.tabs().classes("w-full bg-white text-primary shadow-1").props("align=left inline-label") as tabs:
+    with ui.tabs().classes("w-full bg-white text-primary").props("align=left inline-label") as tabs:
         t_setup = ui.tab("Setup", icon="tune")
         t_review = ui.tab("Review", icon="fact_check")
         t_report = ui.tab("Report", icon="description")
@@ -395,6 +464,8 @@ async def load_session(path: str) -> None:
     except Exception as e:  # noqa: BLE001
         ui.notify(f"Could not open session: {e}", type="negative")
         return
+    if session.settings.document == DocumentInfo():  # saved before 0.3.1: start from the company details
+        session.settings.document = app_settings().document.copy()
     S.session, S.session_path, S.settings = session, Path(path), session.settings
     ds = {d.kind: d.path for d in session.datasets}
     S.inputs = {"control": session.control_path, "ortho": ds.get(DatasetKind.ORTHO, ""),
@@ -637,8 +708,7 @@ def drop_zone() -> None:
     else:
         text = "Drag and drop works in the RealityCheck desktop window"
         sub = "In a browser tab, use the Browse buttons or paste a path (Shift + right-click a file → Copy as path)"
-    with ui.column().classes("w-full items-center gap-0 q-pa-md rounded-borders").style(
-            "border: 2px dashed #9bbfc4; background: #f4fafa"):
+    with ui.column().classes("w-full items-center gap-0 q-pa-md rc-drop"):
         ui.icon("file_download", size="md").classes("text-primary")
         ui.label(text).classes("text-body1 text-weight-medium")
         ui.label(sub).classes("text-caption text-grey-7 text-center")
@@ -697,10 +767,13 @@ def review_panel() -> None:
         ui.label("Run the checks on the Setup tab first.").classes("text-grey-7")
         return
     for m in S.warnings:
-        ui.label(m).classes("text-orange-9")
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            ui.icon("warning", size="xs")
+            ui.label(m).classes("text-weight-medium")
 
     with ui.row().classes("w-full no-wrap gap-4 items-start"):
         with ui.column().classes("w-[44%] min-w-[420px]"):
+            outside_button()
             point_table()
         with ui.column().classes("grow"):
             point_detail()
@@ -725,6 +798,29 @@ def _step(delta: int) -> None:
     S.selected = ids[(i + delta) % len(ids)]
     point_table.refresh()
     point_detail.refresh()
+
+
+@ui.refreshable
+def outside_button() -> None:
+    """Disable, in one go, the enabled points that no dataset has data for (they are also left off the map)."""
+    ids = [pr.point.id for pr in point_results(S.session) if pr.point.enabled and pr.outside_data]
+    if not ids:
+        return
+
+    def disable() -> None:
+        done = disable_outside_data(S.session)
+        _mark_dirty()
+        outside_button.refresh()
+        point_table.refresh()
+        point_detail.refresh()
+        ui.notify(f"Disabled {len(done)} point{'s' if len(done) != 1 else ''} outside the data: {', '.join(done)}.",
+                  multi_line=True)
+
+    with ui.row().classes("w-full items-center gap-2 no-wrap"):
+        ui.button(f"Disable {len(ids)} outside the data", icon="block", on_click=disable).props(
+            "outline dense no-caps").tooltip(
+            "Points that no dataset has data for (outside every dataset, or on no-data cells): "
+            + ", ".join(ids) + ". Each can be enabled again on its own.")
 
 
 @ui.refreshable
@@ -755,6 +851,8 @@ def point_table() -> None:
         flags = []
         if not cp.enabled:
             flags.append("off")
+        if pr.outside_data:
+            flags.append("outside data")
         if cp.needs_touch_up:
             flags.append("touch-up")
         if pr.manual:
@@ -807,6 +905,7 @@ def point_detail() -> None:
         def set_attr(attr, value):
             setattr(cp, attr, value)
             _mark_dirty()
+            outside_button.refresh()
             point_table.refresh()
 
         ui.switch("Enabled", value=cp.enabled, on_change=lambda e: set_attr("enabled", e.value)).tooltip(
@@ -988,7 +1087,9 @@ def batch_panel() -> None:
                 item.status = "running"
                 batch_table.refresh()
                 try:
-                    await run.io_bound(run_one, item, S.settings, S.batch_options, LOG.put)
+                    # Company details only: the open session's client, document number etc. are not this project's.
+                    await run.io_bound(run_one, item, replace(S.settings, document=app_settings().document.copy()),
+                                       S.batch_options, LOG.put)
                 except Exception as e:  # noqa: BLE001 - keep going with the next project
                     log.exception("Batch project %s failed", item.project)
                     item.status, item.message = "failed", f"{type(e).__name__}: {e}"
@@ -1006,8 +1107,7 @@ def batch_panel() -> None:
 def batch_table() -> None:
     items = S.batch_items
     if not items:
-        with ui.column().classes("w-full items-center gap-0 q-pa-xl rounded-borders").style(
-                "border: 2px dashed #9bbfc4; background: #f4fafa"):
+        with ui.column().classes("w-full items-center gap-0 q-pa-xl rc-drop"):
             ui.icon("create_new_folder", size="lg").classes("text-primary")
             ui.label("Drag project folders here").classes("text-body1 text-weight-medium")
         return
@@ -1235,9 +1335,14 @@ def template_editor() -> None:
         _save_settings()
         template_editor.refresh()
 
-    def delete():
+    async def delete():
         if len(app_.templates) <= 1:
             ui.notify("Keep at least one template.", type="warning")
+            return
+        builtin = (" Built-in templates can be added back with Restore built-ins."
+                   if t.name in {b.name for b in builtin_templates()} else "")
+        if not await confirm(f"Delete template {t.name!r}?", f"It is removed from settings.json.{builtin}",
+                             "Delete template"):
             return
         app_.remove(t.name)
         _save_settings()
@@ -1270,7 +1375,7 @@ def template_editor() -> None:
         ui.button("Test", icon="rule_folder", on_click=test).props("outline").tooltip(
             "Show what this template finds in the example project (unsaved changes included)")
         ui.space()
-        ui.button("Delete", icon="delete", on_click=delete).props("flat color=negative")
+        ui.button("Delete", icon="delete_outline", on_click=delete).props("flat")
 
 
 # ---------- Report ----------
@@ -1291,7 +1396,8 @@ def report_panel() -> None:
         ui.button("Residuals CSV", icon="table_view", on_click=lambda: export("residuals")).props("outline")
         ui.button("Summary CSV", icon="table_view", on_click=lambda: export("summary")).props("outline")
 
-    frame = ui.element("iframe").classes("w-full border rounded").style("height: calc(100vh - 230px)")
+    document_editor()
+    frame = ui.element("iframe").classes("w-full").style("height: calc(100vh - 260px); border:1px solid #111")
 
     async def refresh():
         refresh_btn.props("loading")
@@ -1330,6 +1436,78 @@ def report_panel() -> None:
             ui.notify(f"Export failed: {type(e).__name__}: {e}", type="negative", multi_line=True)
         finally:
             n.dismiss()
+
+
+LOGO_FILE_TYPES = [("Images", "*.png *.jpg *.jpeg *.svg *.gif *.webp"), ("All files", "*.*")]
+DOC_FIELDS = [  # (attribute, label, tooltip), four to a row
+    ("project", "Project", ""), ("site", "Site", ""), ("client", "Client", ""), ("subtitle", "Subtitle",
+     "Under the title. Blank: RealityCheck QA/QC report"),
+    ("job_number", "Job No.", ""), ("document_number", "Document No.", ""), ("revision", "Revision", ""),
+    ("date", "Issue date", "Blank: today"),
+    ("company", "Company", ""), ("author", "Author", ""), ("confidentiality", "Confidentiality",
+     "e.g. Commercial in confidence; on every sheet"), ("footer", "Title strip note",
+     "Shown on every sheet when no confidentiality is set"),
+]
+
+
+def document_editor() -> None:
+    """Report title block, title strip and sign-off: the session's DocumentInfo. Refresh the preview to see it."""
+    doc = S.settings.document
+    for role in SIGN_ROLES:  # one row per usual role, so the grid below is always complete
+        if not any(s.role == role for s in doc.signatories):
+            doc.signatories.append(Signatory(role))
+
+    def set_doc(obj, attr: str, value) -> None:
+        setattr(obj, attr, (value or "").strip())
+        if S.session:
+            S.session.settings = S.settings
+            _mark_dirty()
+
+    with ui.expansion("Document details", icon="badge", caption="Title block, title strip on every sheet, sign-off"
+                      ).classes("w-full").props("dense header-class=text-weight-medium"):
+        with ui.grid(columns=4).classes("w-full gap-x-4 gap-y-0"):
+            for attr, label, tip in DOC_FIELDS:
+                inp = ui.input(label, value=getattr(doc, attr),
+                               on_change=lambda e, a=attr: set_doc(doc, a, e.value)).props("dense")
+                if tip:
+                    inp.tooltip(tip)
+            for attr, label in (("logo", "Company logo"), ("client_logo", "Client logo")):
+                with ui.row().classes("items-center no-wrap gap-1"):
+                    inp = ui.input(label, value=getattr(doc, attr),
+                                   on_change=lambda e, a=attr: set_doc(doc, a, e.value)).classes("grow").props(
+                        "dense clearable").tooltip("PNG, JPG, SVG, GIF or WebP, up to 2 MB. Embedded in the report.")
+
+                    async def browse(inp=inp):
+                        path = await ask_open("Choose a logo", LOGO_FILE_TYPES)
+                        if path:
+                            inp.set_value(path)
+
+                    ui.button(icon="folder_open", on_click=browse).props("flat dense").tooltip("Choose file")
+            ui.input("Appendix letter", value=doc.appendix, on_change=lambda e: set_doc(doc, "appendix", e.value)
+                     ).props("dense").tooltip("e.g. B: the report becomes Appendix B, sections B1 … and sheets B-1 …")
+            ui.input("Appendix title", value=doc.appendix_title,
+                     on_change=lambda e: set_doc(doc, "appendix_title", e.value)).props("dense").tooltip(
+                "Blank: the project title")
+        ui.label("Sign-off").classes("text-subtitle1 q-mt-md")
+        with ui.grid(columns="9rem 1fr 1fr").classes("w-full gap-x-4 gap-y-0 items-center"):
+            for sig in doc.signatories:
+                ui.label(sig.role).classes("text-caption text-weight-medium")
+                ui.input("Name", value=sig.name, on_change=lambda e, s=sig: set_doc(s, "name", e.value)).props("dense")
+                ui.input("Position", value=sig.position,
+                         on_change=lambda e, s=sig: set_doc(s, "position", e.value)).props("dense")
+        ui.label("Rows with a name or position become the sign-off table, with blank signature and date cells."
+                 ).classes("text-caption text-grey-7")
+
+        def save_company() -> None:
+            app_settings().document = doc.company_defaults()
+            _save_settings()
+            ui.notify("Saved company, author, logo, confidentiality, note and sign-off as defaults for new runs.",
+                      type="positive", multi_line=True)
+
+        ui.button("Save company details as defaults", icon="save", on_click=save_company).props(
+            "outline dense").classes("q-mt-sm").tooltip(
+            "Company, author, company logo, confidentiality, title strip note and sign-off, in settings.json. "
+            "Project details (client, site, document number …) stay with this session.")
 
 
 def _build_report_html() -> str:
