@@ -3,6 +3,31 @@
 All notable changes to RealityCheck. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - in development
+
+### Added
+- Update notice: at start RealityCheck asks GitHub for the latest release and,
+  if it is newer, shows a notice with what's new and a *Download* button
+  (opens the release page). *Not now* hides it for this run; *Skip this
+  version* until the next release. Nothing is downloaded or installed
+  automatically. Turn it off on the Settings tab or with
+  `"updates": {"check": false}` in `settings.json`.
+- Metashape Professional script (`scripts\metashape\realitycheck_batch.py`,
+  in the download) for the *Run Script* job of a Batch Process: runs
+  RealityCheck on the open project with your template (`--template`,
+  `--up`, `--pdf`, `--open`, …) after the export jobs.
+- `gui --open SESSION`, `batch … --open` (review the result when the batch
+  is done), and `RealityCheck.exe SESSION.rcheck.json` (*Open with*).
+- README: an Automation section (Metashape batch, a watch-folder script for
+  Pix4D or any other software, Pix4Dmapper's command line) and an Updates
+  section.
+
+### Fixed
+- In browser mode RealityCheck kept running in the background after its tab
+  was closed. It now stops about 10 seconds after the last tab closes (a
+  reload is not a close), and a *Quit* button stops it at once. The browser
+  asks before closing the tab if review work is unsaved.
+
 ## [0.3.1] - 2026-11-03
 
 ### Added
