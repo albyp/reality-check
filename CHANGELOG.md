@@ -3,6 +3,44 @@
 All notable changes to RealityCheck. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.1] - 2026-11-03
+
+### Added
+- Report document details, as in Plumb CounterCheck: company and client
+  logos, project, site, client, job number, document number, revision,
+  issue date, author, subtitle, confidentiality and a sign-off table
+  (Prepared / Checked / Approved by, with blank signature and date cells).
+  An appendix letter turns the report into "Appendix B", with sections B1 …
+  and sheets B-1 …. Edit them under *Document details* on the Report tab;
+  they are saved in the session. *Save company details as defaults* keeps
+  the company, author, company logo, confidentiality and sign-off in
+  `settings.json` for new runs and batches. `run --document FILE` reads them
+  from a JSON file.
+- Review: *Disable N outside the data* disables, in one go, the points that
+  no dataset has data for (outside every dataset, or on no-data cells), with
+  the note "Outside the data". The point table flags them "outside data".
+
+### Changed
+- The report and the app use the Plumb house style ("Drawing Sheet"):
+  Bahnschrift (DIN) lettering, a title block with ruled cells, numbered and
+  boxed section headings, ruled tables, a PASS / FAIL stamp in the summary,
+  and on every sheet a running title, the sheet number and a three-cell
+  title strip. Ink only; red marks nonconformance only (FAIL, values over
+  tolerance, targets not found). Items to review carry NC and CHECK tags.
+- dZ colours on the site overview, and the elevation colours on DEM and
+  point cloud chips, run navy → grey → cream, so they still read on a
+  black-and-white copy. Disabled points on the overview are hollow.
+- The overview legend and chip labels use Bahnschrift.
+- The site overview leaves out points that no dataset has data for, so a
+  stray point far off site no longer shrinks the map; the caption lists
+  them.
+- App: square corners, no shadows, black for the selected row, and a status
+  bar (session, saved or not, version). *Clear* and template *Delete* are
+  ink, not red, and both ask first (template *Delete* did not).
+
+### Fixed
+- The HTML report had no doctype, so browsers rendered it in quirks mode.
+
 ## [0.3.0] - 2026-10-31
 
 ### Added
