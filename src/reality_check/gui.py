@@ -20,7 +20,7 @@ from pathlib import Path
 
 from nicegui import app, run, ui
 
-from reality_check import __version__, appsettings, windialogs
+from reality_check import __version__, appsettings, updates, windialogs
 from reality_check.batch import BatchOptions, BatchResult, plan, run_one
 from reality_check.cloud import CLASS_NAMES, Chunk, is_classified
 from reality_check.detect import detect
@@ -92,6 +92,10 @@ class State:
     batch_running: bool = False
     edit_template: str = ""  # Settings: template open in the editor
     example_project: str = ""  # Settings: project folder the template editor browses and tests against
+    open_on_start: str = ""  # session file to open when the page first loads (gui --open, batch --open)
+    update: updates.Release | None = None  # a newer release on GitHub
+    update_checked: bool = False  # checked once per run
+    update_hidden: bool = False  # "Not now"
 
 
 S = State()
@@ -150,6 +154,11 @@ _DROP_JS = """
 <script>
 window.addEventListener('dragover', e => e.preventDefault());
 window.addEventListener('drop', e => { e.preventDefault(); if (!window.pywebview) emitEvent('rc_drop_browser', {}); });
+// Browser mode: closing the tab ends RealityCheck (see _watch_clients), so ask
+// first when review work is unsaved. window.rcDirty is kept up to date by the page.
+window.addEventListener('beforeunload', e => {
+  if (window.rcDirty && !window.pywebview) { e.preventDefault(); e.returnValue = ''; }
+});
 </script>
 """
 
@@ -364,6 +373,9 @@ def index() -> None:
         ui.space()
         ui.button("Open session", icon="folder_open", on_click=lambda: open_session()).props("flat")
         ui.button("Save session", icon="save", on_click=lambda: save_session()).props("flat")
+        if not S.desktop:  # the desktop window ends RealityCheck when it closes; a browser tab needs a way out
+            ui.button("Quit", icon="power_settings_new", on_click=lambda: quit_app()).props("flat").tooltip(
+                "Close RealityCheck. Closing this tab does the same after a few seconds.")
 
     with ui.footer().classes("bg-white text-black q-px-md q-py-xs items-center rc-status"):
         status_session = ui.label().classes("rc-status")
@@ -371,7 +383,12 @@ def index() -> None:
         status_saved = ui.label().classes("rc-status")
         ui.label(f"PLUMB REALITYCHECK {__version__}").classes("rc-status q-ml-lg")
 
+    shown_dirty: list[bool | None] = [None]
+
     def update_status() -> None:
+        if shown_dirty[0] != S.dirty:  # for the browser's "leave site?" prompt
+            shown_dirty[0] = S.dirty
+            ui.run_javascript(f"window.rcDirty = {'true' if S.dirty else 'false'}")
         if S.session is None:
             status_session.set_text("NO SESSION · run the checks on the Setup tab")
             status_saved.set_text("")
@@ -393,6 +410,25 @@ def index() -> None:
             ui.label("To get the desktop window, install the Microsoft Edge WebView2 Runtime "
                      "(https://developer.microsoft.com/microsoft-edge/webview2/), then restart RealityCheck. "
                      f"Reason: {S.fallback_reason}").classes("text-caption text-grey-8")
+    update_notice()
+    if not S.update_checked:
+        S.update_checked = True
+        ui.timer(1.0, check_for_update, once=True)
+    if S.open_on_start:
+        client = ui.context.client
+
+        async def open_on_start() -> None:
+            # Wait for a page that is really open: a plain HTTP fetch of the page never connects.
+            # load_session ends by reloading the page, which needs the connection too.
+            try:
+                await client.connected(timeout=60)
+            except TimeoutError:
+                return
+            if S.open_on_start:
+                path, S.open_on_start = S.open_on_start, ""
+                await load_session(path)
+
+        ui.timer(0.1, open_on_start, once=True)
     with ui.tabs().classes("w-full bg-white text-primary").props("align=left inline-label") as tabs:
         t_setup = ui.tab("Setup", icon="tune")
         t_review = ui.tab("Review", icon="fact_check")
@@ -466,23 +502,119 @@ async def load_session(path: str) -> None:
         return
     if session.settings.document == DocumentInfo():  # saved before 0.3.1: start from the company details
         session.settings.document = app_settings().document.copy()
+    # Read the data first: a moved or missing file leaves the current session as it was.
+    S.busy = True
+    n = ui.notification("Reading point clouds…", spinner=True, timeout=None)
+    try:
+        windows = await run.io_bound(load_windows, session, LOG.put)
+        warnings = await run.io_bound(check_crs, session.datasets, LOG.put)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Could not read the data of session %s", path)
+        ui.notify(f"Could not open the session: one of its data files could not be read ({e}). "
+                  "Files that have moved need to be loaded again on the Setup tab.", type="negative",
+                  multi_line=True, timeout=0, close_button=True)
+        return
+    finally:
+        S.busy = False
+        n.dismiss()
     S.session, S.session_path, S.settings = session, Path(path), session.settings
+    S.windows, S.warnings = windows, warnings
     ds = {d.kind: d.path for d in session.datasets}
     S.inputs = {"control": session.control_path, "ortho": ds.get(DatasetKind.ORTHO, ""),
                 "dem": ds.get(DatasetKind.DEM, ""), "cloud": ds.get(DatasetKind.CLOUD, ""),
                 "spots": session.spots_path}
-    S.busy = True
-    n = ui.notification("Reading point clouds…", spinner=True, timeout=None)
-    try:
-        S.windows = await run.io_bound(load_windows, session, LOG.put)
-        S.warnings = await run.io_bound(check_crs, session.datasets, LOG.put)
-    finally:
-        S.busy = False
-        n.dismiss()
     _new_renderer()
     S.selected = session.points[0].id if session.points else None
     S.dirty = False
     ui.navigate.reload()
+
+
+# ---------- update notice ----------
+
+async def check_for_update() -> None:
+    app_ = app_settings()
+    S.update = await run.io_bound(updates.available_update, app_.check_updates, app_.skipped_version)
+    if S.update:
+        log.info("Update available: %s", S.update.version)
+        update_notice.refresh()
+
+
+@ui.refreshable
+def update_notice() -> None:
+    rel = S.update
+    if rel is None or S.update_hidden:
+        return
+    import webbrowser
+
+    def not_now() -> None:
+        S.update_hidden = True
+        update_notice.refresh()
+
+    def skip() -> None:
+        app_settings().skipped_version = rel.version
+        _save_settings()
+        not_now()
+        ui.notify(f"You won't be told about {rel.version} again. Later versions will still show.")
+
+    with ui.card().classes("w-full q-pa-sm rc-update"):
+        with ui.row().classes("w-full items-center gap-3 no-wrap"):
+            ui.icon("system_update_alt").classes("text-h6")
+            with ui.column().classes("gap-0 grow"):
+                ui.label(f"RealityCheck {rel.version} is available. You have {__version__}.").classes(
+                    "text-body2 text-weight-medium")
+                ui.label("Download the zip from the release page. Close RealityCheck, then extract the zip over "
+                         "this copy: your settings.json (templates, defaults, company details) is kept."
+                         ).classes("text-caption text-grey-8")
+            ui.button("Download", icon="download", on_click=lambda: webbrowser.open(rel.url))
+            ui.button("Not now", on_click=not_now).props("flat")
+            ui.button("Skip this version", on_click=skip).props("flat")
+        notes = updates.summary(rel.notes)
+        if notes:
+            with ui.expansion("What's new").classes("w-full text-caption"):
+                ui.label(notes).classes("text-caption").style("white-space:pre-line")
+
+
+# ---------- quitting (browser mode) ----------
+
+QUIT_GRACE = 10  # s without any open tab before browser mode stops; covers a page reload
+
+
+async def quit_app() -> None:
+    if S.dirty and not await confirm("Quit without saving?", "The review work in this session has not been saved.",
+                                     "Quit"):
+        return
+    import asyncio
+
+    from nicegui import background_tasks
+
+    ui.run_javascript("window.rcDirty = false; document.body.innerHTML = "
+                      "'<p style=\"font:16px sans-serif;margin:40px\">RealityCheck has closed. "
+                      "You can close this tab.</p>'")
+
+    async def stop() -> None:  # a moment for the message to reach the tab
+        await asyncio.sleep(0.5)
+        app.shutdown()
+
+    background_tasks.create(stop(), name="quit")
+
+
+def _watch_clients() -> None:
+    """Browser mode: stop the server when no tab has been connected for QUIT_GRACE seconds.
+
+    Without this, closing the tab leaves RealityCheck running in the background.
+    The desktop window ends the process itself when it closes.
+    """
+    import asyncio
+
+    from nicegui import Client
+
+    async def on_disconnect() -> None:
+        await asyncio.sleep(QUIT_GRACE)
+        if not any(c.has_socket_connection for c in Client.instances.values()):
+            log.info("No RealityCheck tab open; stopping")
+            app.shutdown()
+
+    app.on_disconnect(on_disconnect)
 
 
 def apply_drop(paths: list[str]) -> None:
@@ -1194,6 +1326,17 @@ def settings_panel() -> None:
                 ui.notify("Defaults saved. They apply to new runs; the trimmed mean applies now.", type="positive")
 
             ui.button("Save defaults", icon="save", on_click=save_defaults)
+
+            def set_check(e) -> None:
+                app_.check_updates = bool(e.value)
+                if e.value:
+                    app_.skipped_version = ""  # turning it back on shows a skipped release again
+                _save_settings()
+
+            ui.separator().classes("q-my-sm")
+            ui.checkbox("Check for a new version at start", value=app_.check_updates, on_change=set_check).tooltip(
+                "Asks GitHub for the latest release when RealityCheck starts and shows a notice if it is newer. "
+                "Nothing is downloaded or installed.")
         with ui.card().classes("grow"):
             template_editor()
 
@@ -1553,26 +1696,30 @@ def _is_realitycheck(port: int) -> bool:
         return False
 
 
-def start(port: int = 8765, show: bool = True) -> None:
+def start(port: int = 8765, show: bool = True, open_session: str = "") -> None:
     """Browser mode: serve on localhost and open a browser tab."""
     import webbrowser
 
+    S.open_on_start = open_session or S.open_on_start
     if not _port_free(port):
-        if _is_realitycheck(port):
+        if _is_realitycheck(port) and not S.open_on_start:
             print(f"RealityCheck is already running at http://127.0.0.1:{port}/")
             if show:
                 webbrowser.open(f"http://127.0.0.1:{port}/")
             return
         port = next(p for p in range(port + 1, port + 100) if _port_free(p))
     app.on_shutdown(lambda: S.renderer and S.renderer.close())
+    if show:  # no tab of its own (--no-browser, tests): keep running
+        _watch_clients()
     ui.run(title="RealityCheck", host="127.0.0.1", port=port, reload=False, show=show,
            reconnect_timeout=30, uvicorn_logging_level="warning")
 
 
-def start_desktop() -> None:
+def start_desktop(open_session: str = "") -> None:
     """Desktop window with drag and drop. Falls back to the browser if WebView2 is missing."""
     from reality_check.desktop import run_desktop
 
+    S.open_on_start = open_session
     S.desktop = True
     try:
         run_desktop()
