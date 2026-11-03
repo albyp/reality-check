@@ -1,7 +1,7 @@
 """Application settings: settings.json next to the executable.
 
 Holds default values for new runs, the company details for the report title
-block and the project templates. The file is
+block, the project templates and the update check. The file is
 created on first use with the built-in templates, so it can be edited in the
 app (Settings tab) or by hand.
 
@@ -45,6 +45,8 @@ class AppSettings:
     default_template: str = "Project root"
     templates: list[Template] = field(default_factory=builtin_templates)
     document: DocumentInfo = field(default_factory=DocumentInfo)  # company details every new report starts with
+    check_updates: bool = True  # look for a newer release on GitHub at start
+    skipped_version: str = ""  # the user chose "Skip this version" for this release
 
     def template(self, name: str) -> Template | None:
         return next((t for t in self.templates if t.name == name), None)
@@ -92,6 +94,7 @@ class AppSettings:
             "default_template": self.default_template,
             "templates": [t.to_dict() for t in self.templates],
             "document": self.document.company_defaults().to_dict(),
+            "updates": {"check": self.check_updates, "skipped": self.skipped_version},
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
@@ -158,7 +161,9 @@ def load(path: Path | None = None) -> AppSettings:
     defaults = Defaults(**{k: v for k, v in d.get("defaults", {}).items() if k in known})
     templates = [_upgrade(t) for t in d.get("templates", [])] or builtin_templates()
     document = DocumentInfo.from_dict(d.get("document")).company_defaults()
-    return AppSettings(path, defaults, d.get("default_template", templates[0].name), templates, document)
+    upd = d.get("updates") or {}
+    return AppSettings(path, defaults, d.get("default_template", templates[0].name), templates, document,
+                       check_updates=bool(upd.get("check", True)), skipped_version=str(upd.get("skipped", "")))
 
 
 def _upgrade(raw: dict) -> Template:
