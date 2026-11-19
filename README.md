@@ -53,14 +53,20 @@ Metashape marker export).
 
 Spot heights coded `CS1`, `CS2` … are cross sections: each code is one
 section, its points joined in the order they are in the file (the order they
-were surveyed). They are taken out of the spot heights table and get a
-section of their own in the report:
+were surveyed). If that order zig-zags (points picked up out of order, or one
+added at the end of the file later), the points are sorted along the section
+instead and the report says so. They are taken out of the spot heights table
+and get a section of their own in the report:
 
 - A profile chart: chainage along the string, height up, with the vertical
-  exaggeration stated. Point cloud points within the corridor (0.5 m wide)
-  are grey dots, the cloud's median a dashed line, a DEM a solid line, and the
-  surveyed points diamonds, joined by a line or not (*Join cross-section
-  points* on the Report tab).
+  exaggeration stated. Point cloud points within the corridor are grey dots,
+  the cloud's median a dashed line, a DEM a solid line, and the surveyed points
+  diamonds, joined by a line or not (*Join cross-section points* on the Report
+  tab).
+- The corridor width is set from the point density unless you set one: the
+  narrowest width (0.1 to 2 m) that gives about 8 points per 0.1 m along the
+  section, so a dense cloud gets a tight corridor and a sparse one a wide one.
+  The chart's legend states the width used.
 - dZ at each surveyed point. For a point cloud this is the median of the
   corridor points within 0.05 m of the point's chainage, so a kerb top is
   compared with the kerb, not the road beside it.
@@ -71,7 +77,11 @@ section of their own in the report:
   or a best fit that barely improves the match, gives no shift. Two sections
   at right angles give both horizontal directions.
 
-The sections are drawn on the site overview, and exported in the CSVs (role
+On the site overview each section is a drawing-style section mark,
+`/\___CS1___/\`: the line, a triangle at each end pointing the way the
+section is viewed in its chart, and the code on its middle. A section shorter
+than 22 mm on the map (most are, on a whole-site map) gets a mark 22 mm long,
+centred on it. Sections are exported in the CSVs (role
 `section`, with a `code` column; a `section CS1` row per surface in the
 summary). The codes (`section_codes`, default `CS*`, comma-separated
 wildcards such as `CS*, XS*`) and the corridor width (`section_width`) are on
@@ -145,7 +155,7 @@ or on the Settings tab. Its `defaults`:
 | `trim` | `0.1` | Average offsets: fraction of dZ values left out, half from each end. `0.1` = 90% trimmed mean (Excel `TRIMMEAN(…, 0.1)`); `0` = plain mean |
 | `spot_max_outside` | `10.0` | Spot heights further than this (metres) from all DEM and cloud data are disregarded and listed |
 | `section_codes` | `"CS*"` | Spot height codes that make cross sections: comma-separated wildcards |
-| `section_width` | `0.5` | Cross sections: width in metres of the point cloud corridor along each section |
+| `section_width` | `0` | Cross sections: width in metres of the point cloud corridor along each section; `0` = set from the point density |
 
 ### Report document details
 
@@ -171,6 +181,18 @@ Outputs go inside each project folder, or into one output folder if set. A
 missing orthomosaic or DEM is noted, not an error; a project without control
 points is skipped. The results table opens each report, or the session in
 Review for manual adjustments.
+
+### Processing times
+
+Every run records how long each step took: reading each file, the checks and
+other maths, drawing the map, charts, tables and snapshots, and writing each
+export, with the total. They show in three places: *Processing times* under
+Progress on the Setup tab, a *Processing times* dropdown at the end of the
+HTML report (on screen only, not in print), and at the end of the command
+line output. The Batch tab shows each project's total time, and the log
+(`%LOCALAPPDATA%\RealityCheck\realitycheck.log`) has every step. A slow step
+stands out at once, which helps when a large dataset takes longer than
+expected.
 
 ### Reading the numbers
 
@@ -210,8 +232,8 @@ reality-check crs list
 `run` writes `<title>_RealityCheck.html` and `<title>_RealityCheck.rcheck.json`
 (open it in the GUI to review). The title defaults to the control file name.
 Options: `--title`, `--pdf`, `--csv`, `--spots FILE` (spot heights, and
-cross sections from their codes: `--section-codes "CS*"`, `--section-width 0.5`,
-`--no-section-join`),
+cross sections from their codes: `--section-codes "CS*"`, `--section-width 0.5`
+(default 0: from the point density), `--no-section-join`),
 `--trim` (default 0.1), `--spot-max-outside` (default 10 m), `--radius` (cloud Z search radius,
 default 0.5 m), `--classes 2,11`, `--tol-z`, `--tol-xy`, `--chip-size`,
 `--control-crs NAME` (control points in a local grid from the CRS library),
