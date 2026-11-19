@@ -18,11 +18,12 @@ from reality_check.export import write_residuals, write_summary
 from reality_check.models import DatasetKind
 from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
-from reality_check.report import write_html, write_pdf
+from reality_check.report import build_html, write_pdf
 from reality_check.review import point_results
 from reality_check.sections import plain_spots, section_lines
 from reality_check.session import Settings, output_name
 from reality_check.stats import summarise, z_offsets
+from reality_check.timings import Timings
 from reality_check.templates import Resolution, Template, resolve
 
 log = logging.getLogger("reality_check")
@@ -47,6 +48,11 @@ class BatchResult:
     session_path: str = ""
     headline: list[str] = field(default_factory=list)  # e.g. "DEM Z RMSE 20 mm (checkpoints) PASS"
     exceed_count: int = 0
+    timings: Timings = field(default_factory=Timings)  # every step of this project's run and outputs
+
+    @property
+    def seconds(self) -> float:
+        return self.timings.total
 
 
 def plan(template: Template, projects: list[str | Path]) -> list[BatchResult]:
@@ -64,7 +70,8 @@ def run_one(item: BatchResult, settings: Settings, options: BatchOptions, progre
                              [f["cloud"]] if "cloud" in f else [])
     project_settings = replace(settings, project_title=item.project.name)
     result = run(f["control"], datasets, project_settings, progress=progress, spots_path=f.get("spots"))
-    s = result.session
+    s, t = result.session, result.timings
+    item.timings = t
     out = Path(options.out_dir) if options.out_dir else item.project
     out.mkdir(parents=True, exist_ok=True)
 
@@ -75,17 +82,27 @@ def run_one(item: BatchResult, settings: Settings, options: BatchOptions, progre
     if options.pdf or options.html:
         renderer = ChipRenderer(s, result.windows)
         try:
+            html = build_html(s, renderer, result.warnings, timings=t)  # once, for the HTML and the PDF
+            t.start_phase("export")
             if options.html:
-                item.outputs.append(str(write_html(s, renderer, out / output_name(s, "html"), result.warnings)))
+                path = out / output_name(s, "html")
+                with t.step("Write", "HTML file", path.name):
+                    path.write_text(html, encoding="utf-8")
+                item.outputs.append(str(path))
             if options.pdf:
-                item.outputs.append(str(write_pdf(s, renderer, out / output_name(s, "pdf"), result.warnings)))
+                item.outputs.append(str(write_pdf(s, renderer, out / output_name(s, "pdf"), result.warnings, t,
+                                                  html=html)))
         finally:
             renderer.close()
     if options.csv:
-        for kind, writer in (("residuals", write_residuals), ("summary", write_summary)):
-            path = out / output_name(s, kind)
-            writer(s, path, result.windows)
-            item.outputs.append(str(path))
+        if t.phase != "export":
+            t.start_phase("export")
+        with t.step("Write", "Residuals and summary CSV"):
+            for kind, writer in (("residuals", write_residuals), ("summary", write_summary)):
+                path = out / output_name(s, kind)
+                writer(s, path, result.windows)
+                item.outputs.append(str(path))
+    log.info("Processing times for %s:\n%s", item.project.name, t.table())
 
     item.headline = _headline(s, result.windows)
     item.exceed_count = sum(1 for pr in point_results(s) if pr.point.enabled and pr.exceeds)
