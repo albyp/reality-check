@@ -1,4 +1,5 @@
 import csv
+import math
 from pathlib import Path
 
 import numpy as np
@@ -15,9 +16,12 @@ from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
 from reality_check.report import build_html
 from reality_check.sections import (
+    AUTO_MAX_WIDTH,
+    AUTO_MIN_WIDTH,
     MIN_RELIEF,
     Section,
     analyse,
+    auto_width,
     code_matches,
     dem_profile,
     find_sections,
@@ -182,6 +186,36 @@ def test_sections_through_the_pipeline_report_and_exports(control_path, dem_path
     write_summary(s, tmp_path / "sum.csv", res.windows)
     groups = {r["group"] for r in csv.DictReader(open(tmp_path / "sum.csv"))}
     assert "section CS1" in groups and "spot" in groups
+
+
+def test_zig_zag_file_order_is_sorted_along_the_section():
+    straight = [(f"P{i}", X0 + i, Y0, 100.0, "CS1") for i in range(6)]
+    (sec,) = find_sections(_pts(*straight), "CS*")
+    assert not sec.reordered and [p.id for p in sec.nodes] == [f"P{i}" for i in range(6)]
+    # The same points picked up out of order, plus one added at the end of the file later.
+    mixed = [straight[i] for i in (0, 2, 1, 4, 3)] + [("P5", X0 + 2.5, Y0, 100.0, "CS1")]
+    (sec,) = find_sections(_pts(*mixed), "CS*")
+    assert sec.reordered and [p.x - X0 for p in sec.nodes] == [0, 1, 2, 2.5, 3, 4]
+    # Surveyed east to west with two points swapped: sorted, still starting from the east end the file starts at.
+    backwards = [straight[i] for i in (5, 4, 2, 3, 1, 0)]
+    (sec,) = find_sections(_pts(*backwards), "CS*")
+    assert sec.reordered and [p.x - X0 for p in sec.nodes] == [5, 4, 3, 2, 1, 0]
+
+
+def test_curved_section_in_order_is_left_alone():
+    arc = [(f"P{i}", X0 + 10 * math.cos(a), Y0 + 10 * math.sin(a), 100.0, "CS1")
+           for i, a in enumerate(np.linspace(0, math.pi, 9))]
+    (sec,) = find_sections(_pts(*arc), "CS*")
+    assert not sec.reordered
+
+
+def test_automatic_corridor_width_follows_the_point_density():
+    rng = np.random.default_rng(5)
+    length = 10.0
+    for density, expect in ((2000, AUTO_MIN_WIDTH), (140, 0.6), (5, AUTO_MAX_WIDTH)):
+        n = int(density * length * AUTO_MAX_WIDTH)
+        ch, off = rng.uniform(0, length, n), rng.uniform(-AUTO_MAX_WIDTH / 2, AUTO_MAX_WIDTH / 2, n)
+        assert auto_width(ch, off, length) == pytest.approx(expect, abs=0.051), density
 
 
 def test_sample_windows_matches_a_brute_force_search(las_path):
