@@ -23,29 +23,48 @@ All notable changes to RealityCheck. Format based on
   section.
 - Cross sections: spot heights coded `CS1`, `CS2` … (`section_codes`,
   default `CS*`) are strings, joined in file order and taken out of the spot
-  heights table. Each gets a profile chart in the report (point cloud
-  corridor points, the cloud's median, the DEM, the surveyed points, with the
-  vertical exaggeration), dZ per point, and a best fit: how far along the
-  section and how far up or down the surface has to move to match the
-  surveyed shape, a horizontal check without a target where the ground has
-  shape. *Join cross-section points* on the Report tab (saved with the
-  session) draws or hides the line through the surveyed points. Sections are
-  drawn on the site overview, listed in the inputs, in the CSV exports (role
-  `section`, `section <code>` summary rows with `shift_along` and
-  `vertical_after_shift`), the batch results and the command line output
+  heights table. If the file order zig-zags (points picked up out of order or
+  added later), they are sorted along the section and the report says so.
+  Each section gets a profile chart in the report (point cloud corridor
+  points, the cloud's median, the DEM, the surveyed points, with the vertical
+  exaggeration), dZ per point, and a best fit: how far along the section and
+  how far up or down the surface has to move to match the surveyed shape, a
+  horizontal check without a target where the ground has shape. The cloud
+  corridor's width is set from the point density (0.1 to 2 m, about 8 points
+  per 0.1 m of section) unless a width is set. *Join cross-section points* on
+  the Report tab (saved with the session) draws or hides the line through the
+  surveyed points. On the site overview each section is a drawing-style
+  section mark, `/\___CS1___/\`, at least 22 mm long so a short section can
+  be found on a whole-site map. Sections are listed in the inputs, in the CSV
+  exports (role `section`, `section <code>` summary rows with `shift_along`
+  and `vertical_after_shift`), the batch results and the command line output
   (`--section-codes`, `--section-width`, `--no-section-join`). Codes and
   corridor width are on the Settings tab.
 - A code column in control point and spot height files (`Code`,
   `Description`, `Feature` …), kept with each point and in the residuals CSV.
+- Processing times: how long each step took (reading each file, the checks,
+  the map, charts, tables and snapshots, each export) and the total. On the
+  Setup tab, in a dropdown at the end of the HTML report (screen only), at the
+  end of the command line output, per project on the Batch tab, and in the
+  log.
 
 ### Changed
 - In a file without a header, a fifth column of only 0 and 1 is now read as
   the GCP / checkpoint flag (1 = GCP, as in a Metashape marker export). Before,
   it was ignored and every point was "unknown". A fifth column of text is the
   code.
-- The point cloud pass is much faster with many spot heights: 93 M points with
-  478 spot heights took 6 minutes and now take 30 seconds. Each chunk is
-  sorted once, so a window only tests the points in its own strip.
+- Faster, found with the processing times. Measured on a 93.6 M point cloud,
+  a 1 GB orthomosaic and 478 spot heights, a full run with HTML, PDF and CSV
+  went from about 7 minutes to 25 seconds:
+  - The point cloud pass: 6 minutes to 20 seconds. Each chunk is sorted once,
+    so a window only tests the points in its own strip.
+  - The site overview's background: 25 s to 0.2 s. Only the part of the map
+    inside the orthomosaic or DEM is read, which lets GDAL use the file's
+    overviews.
+  - Spot heights outside the data: 7.5 s to 14 ms. A point inside the cloud
+    is found by looking its cell up, not by measuring to every cell.
+  - The command line and Batch build the report once for both the HTML and
+    the PDF, instead of twice.
 
 ### Fixed
 - Opening a session whose data files have moved gave an unhandled error; it
