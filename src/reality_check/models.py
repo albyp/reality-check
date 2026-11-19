@@ -23,6 +23,10 @@ class DatasetKind(str, Enum):
     CLOUD = "cloud"
 
 
+KIND_LABEL = {DatasetKind.ORTHO: "Orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "Point cloud"}  # headings
+KIND_NOUN = {DatasetKind.ORTHO: "orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "point cloud"}  # in a sentence
+
+
 class CheckKind(str, Enum):
     Z = "z"
     XY = "xy"
