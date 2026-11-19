@@ -9,6 +9,7 @@ Legends give the ground scale, the ellipse exaggeration and the dZ colours.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -65,6 +66,32 @@ def _nice_down(x: float) -> float:
     return 10**exp
 
 
+def _read_into(r, bands: list[int], bounds, width: int, height: int,
+                resampling: Resampling) -> np.ma.MaskedArray:
+    """The raster resampled onto a width x height grid over bounds, masked off the raster and on nodata.
+
+    Only the part of bounds inside the raster is read, then placed on the grid. A boundless read would cover
+    the same ground, but it goes through a virtual raster that ignores the file's overviews, so a whole-site
+    map of a large orthomosaic read every full-resolution pixel (25 s for a 1 GB ortho; well under a second
+    from its overviews).
+    """
+    left, bottom, right, top = bounds
+    out = np.ma.masked_all((len(bands), height, width), dtype=r.dtypes[0])
+    rb = r.bounds
+    il, ib, ir, it = max(left, rb.left), max(bottom, rb.bottom), min(right, rb.right), min(top, rb.top)
+    if il >= ir or ib >= it:
+        return out
+    sx, sy = width / (right - left), height / (top - bottom)  # output pixels per metre
+    c0, c1 = int(round((il - left) * sx)), int(round((ir - left) * sx))
+    r0, r1 = int(round((top - it) * sy)), int(round((top - ib) * sy))
+    if c1 <= c0 or r1 <= r0:
+        return out
+    win = from_bounds(il, ib, ir, it, r.transform)
+    out[:, r0:r1, c0:c1] = r.read(bands, window=win, out_shape=(len(bands), r1 - r0, c1 - c0), masked=True,
+                                  resampling=resampling)
+    return out
+
+
 def _background(session: Session, bounds, width: int, height: int) -> tuple[Image.Image, str]:
     """Ortho if present, else DEM hillshade, else blank. Returns (image, source label)."""
     left, bottom, right, top = bounds
@@ -73,15 +100,15 @@ def _background(session: Session, bounds, width: int, height: int) -> tuple[Imag
         if ds is None:
             continue
         with rasterio.open(ds.path) as r:
-            win = from_bounds(left, bottom, right, top, r.transform)
             if kind is DatasetKind.ORTHO:
                 bands = [1, 2, 3] if r.count >= 3 else [1]
-                data = r.read(bands, window=win, out_shape=(len(bands), height, width), boundless=True, masked=True,
-                              resampling=Resampling.average)
+                if r.count >= 4:
+                    bands.append(4)
+                data = _read_into(r, bands, bounds, width, height, Resampling.average)
                 mask = np.ma.getmaskarray(data).any(axis=0)
                 if r.count >= 4:
-                    alpha = r.read(4, window=win, out_shape=(height, width), boundless=True, fill_value=0)
-                    mask |= alpha == 0
+                    mask |= np.ma.filled(data[-1], 0) == 0
+                    data = data[:-1]
                 rgb = np.ma.filled(data, 0).astype(np.uint8)
                 rgb = np.repeat(rgb, 3, axis=0) if rgb.shape[0] == 1 else rgb
                 rgb = np.moveaxis(rgb, 0, -1).copy()
@@ -90,7 +117,7 @@ def _background(session: Session, bounds, width: int, height: int) -> tuple[Imag
                 rgb = (rgb.astype(float) * 0.8 + 255 * 0.2).astype(np.uint8)
                 rgb[mask] = PAPER
                 return Image.fromarray(rgb), "Orthomosaic"
-            z = r.read(1, window=win, out_shape=(height, width), boundless=True, masked=True).astype(float)
+            z = _read_into(r, [1], bounds, width, height, Resampling.nearest)[0].astype(float)
             mask = np.ma.getmaskarray(z)
             zf = np.ma.filled(z, np.nan)
             if mask.all():
@@ -130,6 +157,8 @@ class Overview:
     sheets: list[Image.Image]
     layout: Layout
     left_out: list[str] = field(default_factory=list)  # points outside all the data: not drawn, not in the extent
+    source: str = ""  # background: "Orthomosaic", "DEM hillshade" or "No imagery"
+    background_seconds: float = 0.0  # time spent reading the background imagery (for the processing times)
 
 
 def _median_spacing(xs: np.ndarray, ys: np.ndarray) -> float:
@@ -227,10 +256,11 @@ def render_overview(session: Session) -> Overview:
 
     strings = [(sec.code, [(p.x, p.y) for p in sec.nodes])
                for sec in find_sections(session.spots, session.settings.section_codes)]
-    images, source = [], "No imagery"
+    images, source, background_s = [], "No imagery", 0.0
     for b in layout.tiles:
         tw, th = int((b[2] - b[0]) / mpp), int((b[3] - b[1]) / mpp)  # rounded down, so the strips fit the sheet
-        img, source = _tile(session, results, b, tw, th, mpp, xy_ds, z_ds, dz_limit, factor, font, strings)
+        img, source, secs = _tile(session, results, b, tw, th, mpp, xy_ds, z_ds, dz_limit, factor, font, strings)
+        background_s += secs
         images.append(img)
 
     gap = round(GAP_MM * PX_PER_MM)
@@ -256,7 +286,7 @@ def render_overview(session: Session) -> Overview:
         _legend(out, map_h, mpp, factor, dz_limit, source, xy_ds, z_ds, bool(dxys), font,
                 layout if k > 1 else None, (first, last), xs, ys)
         sheets.append(out)
-    return Overview(sheets, layout, left_out)
+    return Overview(sheets, layout, left_out, source, background_s)
 
 
 def _strip_label(img: Image.Image, x: int, y: int, size: tuple[int, int], number: int, font) -> None:
@@ -270,9 +300,11 @@ def _strip_label(img: Image.Image, x: int, y: int, size: tuple[int, int], number
 
 def _tile(session, results, bounds, width, height, mpp, xy_ds, z_ds, dz_limit, factor, font, strings=()):
     """One strip of the map: background with every point inside it, and the cross sections (strings: code and
-    surveyed XY). Returns (image, source label)."""
+    surveyed XY). Returns (image, source label, seconds spent reading the background)."""
     left, bottom, right, top = bounds
+    start = time.perf_counter()
     img, source = _background(session, bounds, width, height)
+    background_s = time.perf_counter() - start
     img = img.convert("RGBA")
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -280,22 +312,9 @@ def _tile(session, results, bounds, width, height, mpp, xy_ds, z_ds, dz_limit, f
     def to_px(x, y):
         return (x - left) / mpp, (top - y) / mpp
 
-    # Cross sections under the points: a black line cased in white so it reads on any imagery, labelled beside its
-    # middle (its ends often sit next to a control point).
+    # Cross sections under the points, as drawing-style section marks.
     for code, xy in strings:
-        line = [to_px(x, y) for x, y in xy]
-        if not any(0 <= px < width and 0 <= py < height for px, py in line):
-            continue
-        draw.line(line, fill=(255, 255, 255, 255), width=round(1.2 * PX_PER_MM), joint="curve")
-        draw.line(line, fill=(17, 17, 17, 255), width=round(0.5 * PX_PER_MM), joint="curve")
-        (sx, sy), (ex, ey) = line[0], line[-1]
-        n = math.hypot(ex - sx, ey - sy) or 1.0
-        px_, py_ = (sy - ey) / n, (ex - sx) / n  # perpendicular to the line
-        if px_ < 0:  # always the right-hand side on the page, so the text runs away from the line
-            px_, py_ = -px_, -py_
-        mx, my = (sx + ex) / 2 + px_ * 2 * PX_PER_MM, (sy + ey) / 2 + py_ * 2 * PX_PER_MM
-        draw.text((mx, my), code, fill=(255, 255, 255, 255), font=font, anchor="lm", stroke_width=3,
-                  stroke_fill=(0, 0, 0, 255))
+        _section_mark(draw, [to_px(x, y) for x, y in xy], code, width, height, font)
 
     r_marker = round(MARKER_MM * PX_PER_MM)
     for pr in results:
@@ -328,7 +347,52 @@ def _tile(session, results, bounds, width, height, mpp, xy_ds, z_ds, dz_limit, f
         draw.text((px + r_marker + 4, py - r_marker - 2), label, fill=(255, 255, 255, 255), font=font,
                   stroke_width=3, stroke_fill=(0, 0, 0, 255))
 
-    return Image.alpha_composite(img, overlay).convert("RGB"), source
+    return Image.alpha_composite(img, overlay).convert("RGB"), source, background_s
+
+
+SECTION_MARK_MM = 22.0  # shortest section mark on paper; a shorter section gets a mark this long, centred on it
+SECTION_ARROW_MM = 2.4  # view-direction triangle at each end
+
+
+def _section_mark(draw, line: list[tuple[float, float]], code: str, width: int, height: int, font) -> None:
+    """A drawing-style section mark, /\\___CS1___/\\: the line with a triangle at each end pointing the way the
+    section is viewed (first point on the left, as in the report's chart), and the code on its middle.
+
+    The surveyed string is drawn at its real size. If it is shorter than SECTION_MARK_MM on paper, as a short
+    section on a whole-site map is, the mark is drawn that long along the same direction, centred on the
+    section, so it can be found and read at any map scale.
+    """
+    (sx, sy), (ex, ey) = line[0], line[-1]
+    n = math.hypot(ex - sx, ey - sy)
+    if n == 0:
+        return
+    ux, uy = (ex - sx) / n, (ey - sy) / n  # along the section, first to last point (pixels, y down)
+    # Facing the section with the first point on the left, the viewer looks across it to the left of the
+    # direction of travel. On the page (y down) that is (uy, -ux).
+    vx, vy = uy, -ux
+    mark_px = SECTION_MARK_MM * PX_PER_MM
+    if n < mark_px:
+        cx, cy = (sx + ex) / 2, (sy + ey) / 2
+        a = (cx - ux * mark_px / 2, cy - uy * mark_px / 2)
+        b = (cx + ux * mark_px / 2, cy + uy * mark_px / 2)
+        mark = [a, b]
+    else:
+        mark, a, b = line, line[0], line[-1]
+    if not any(-mark_px < px < width + mark_px and -mark_px < py < height + mark_px for px, py in mark):
+        return
+    white, ink = (255, 255, 255, 255), (17, 17, 17, 255)
+    casing, stroke = round(1.2 * PX_PER_MM), round(0.5 * PX_PER_MM)
+    draw.line(mark, fill=white, width=casing, joint="curve")
+    if mark is not line:  # the real string, at its real size, under the enlarged mark
+        draw.line(line, fill=white, width=casing, joint="curve")
+    draw.line(mark, fill=ink, width=stroke, joint="curve")
+    s = SECTION_ARROW_MM * PX_PER_MM
+    for px, py in (a, b):
+        tri = [(px - ux * s / 2, py - uy * s / 2), (px + ux * s / 2, py + uy * s / 2), (px + vx * s, py + vy * s)]
+        draw.polygon(tri, fill=ink, outline=white, width=2)
+    # The code on the middle of the mark, with a white halo that breaks the line around it.
+    mid = mark[len(mark) // 2] if mark is line and len(mark) > 2 else ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    draw.text(mid, code, fill=ink, font=font, anchor="mm", stroke_width=round(0.8 * PX_PER_MM), stroke_fill=white)
 
 
 def _line_h(font) -> int:
