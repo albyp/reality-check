@@ -40,6 +40,7 @@ from reality_check.review import (
     set_manual_xy,
     set_not_found,
 )
+from reality_check.sections import section_ids
 from reality_check.session import SESSION_SUFFIX, Session, Settings, output_name
 from reality_check.templates import (
     DEFAULTS,
@@ -119,7 +120,8 @@ def app_settings() -> appsettings.AppSettings:
 def _default_settings() -> Settings:
     d = app_settings().defaults
     return Settings(tol_z=d.tol_z, tol_xy=d.tol_xy, cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size,
-                    trim=d.trim, spot_max_outside=d.spot_max_outside, document=app_settings().document.copy())
+                    trim=d.trim, spot_max_outside=d.spot_max_outside, section_codes=d.section_codes,
+                    section_width=d.section_width, document=app_settings().document.copy())
 
 
 def _template_names() -> list[str]:
@@ -1302,6 +1304,14 @@ def settings_panel() -> None:
                                 value=d.spot_max_outside, min=0, step=1, format="%g").classes("w-full").tooltip(
                 "Spot heights further than this from the DEM and point cloud data are left out and listed "
                 "under the spot heights table. Applies to the next run (after Clear if a session is open).")
+            codes = ui.input("Cross sections: spot height codes", value=d.section_codes,
+                             placeholder="CS*").classes("w-full").tooltip(
+                "Spot heights with a code matching one of these (comma-separated, * = anything, e.g. CS*, XS*) "
+                "make cross sections: one per code, joined in file order. Applies to the next run.")
+            width = ui.number("Cross sections: cloud corridor width (m)", value=d.section_width, min=0.05, max=5,
+                              step=0.05, format="%.2f").classes("w-full").tooltip(
+                "Point cloud points within half this distance of a cross section are drawn and used. "
+                "Applies to the next run.")
             default_tpl = ui.select(_template_names(), value=app_.default_template, label="Default template"
                                     ).classes("w-full")
             TEMPLATE_SELECTS["default"] = default_tpl
@@ -1314,8 +1324,11 @@ def settings_panel() -> None:
                 kept = 100.0 if keep.value in (None, "") else min(max(float(keep.value), 50.0), 100.0)
                 d.trim = round(1 - kept / 100, 4)
                 d.spot_max_outside = 10.0 if outside.value in (None, "") else max(float(outside.value), 0.0)
-                if S.session is None:  # an open session keeps the limit its list was made with
+                d.section_codes = (codes.value or "").strip() or "CS*"
+                d.section_width = float(width.value or 0.5)
+                if S.session is None:  # an open session keeps what its cloud windows were read with
                     S.settings.spot_max_outside = d.spot_max_outside
+                    S.settings.section_codes, S.settings.section_width = d.section_codes, d.section_width
                 app_.default_template = default_tpl.value or app_.default_template
                 _save_settings()
                 # The trim only changes how the report averages, so it applies to the open session too.
@@ -1533,6 +1546,18 @@ def report_panel() -> None:
         ui.select({s: f"{s:g} m" for s in CHIP_SIZES}, value=S.settings.report_chip_size, label="Report chip width",
                   on_change=lambda e: setattr(S.settings, "report_chip_size", e.value)).classes("w-40").props("dense")
         refresh_btn = ui.button("Refresh preview", icon="refresh")
+        if S.session.spots and section_ids(S.session):
+            def set_join(e) -> None:
+                S.settings.section_join = bool(e.value)
+                _mark_dirty()
+                # Show it at once in the preview; the next build and every export read the setting.
+                ui.run_javascript(
+                    "document.querySelectorAll('iframe').forEach(f => f.contentDocument && f.contentDocument"
+                    f".querySelectorAll('.sections').forEach(s => s.classList.toggle('nojoin', {'false' if e.value else 'true'})))")
+
+            ui.switch("Join cross-section points", value=S.settings.section_join, on_change=set_join).tooltip(
+                "Draw a line through the surveyed points of each cross section, in survey order. "
+                "Off: points only. Applies to the PDF and HTML too.")
         ui.space()
         ui.button("PDF", icon="picture_as_pdf", on_click=lambda: export("pdf"))
         ui.button("HTML", icon="code", on_click=lambda: export("html")).props("outline")
@@ -1674,9 +1699,9 @@ def _export(kind: str, path: Path) -> None:
         finally:
             renderer.close()
     elif kind == "residuals":
-        write_residuals(S.session, path)
+        write_residuals(S.session, path, S.windows)
     else:
-        write_summary(S.session, path)
+        write_summary(S.session, path, S.windows)
 
 
 def _port_free(port: int) -> bool:
