@@ -23,8 +23,9 @@ from reality_check.document import DocumentInfo
 from reality_check.export import write_residuals, write_summary
 from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
-from reality_check.report import write_html, write_pdf
+from reality_check.report import build_html, write_pdf
 from reality_check.sections import plain_spots, section_lines
+from reality_check.timings import fmt as fmt_seconds
 from reality_check.session import SESSION_SUFFIX, Settings, output_name
 from reality_check.stats import summarise, z_offsets
 
@@ -52,8 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="disregard spot heights more than this many metres outside the data (default 10)")
     r.add_argument("--section-codes", default="CS*",
                    help="spot height codes that make cross sections, comma-separated wildcards (default CS*)")
-    r.add_argument("--section-width", type=float, default=0.5,
-                   help="cloud corridor width along a cross section, in metres (default 0.5)")
+    r.add_argument("--section-width", type=float, default=0.0,
+                   help="cloud corridor width along a cross section, in metres (default 0: set from the "
+                        "point density)")
     r.add_argument("--no-section-join", action="store_true",
                    help="report: do not join the surveyed points of a cross section with a line")
     r.add_argument("--title", default="", help="project title (default: control file name)")
@@ -117,18 +119,22 @@ def cmd_run(a) -> int:
         settings.document = DocumentInfo.from_dict(json.loads(Path(a.document).read_text(encoding="utf-8")))
     a.out.mkdir(parents=True, exist_ok=True)
     result = run(a.control, datasets, settings, spots_path=a.spots)
-    s = result.session
+    s, t = result.session, result.timings
     s.save(a.out / output_name(s, "session"))
     renderer = ChipRenderer(s, result.windows)
     try:
-        write_html(s, renderer, a.out / output_name(s, "html"), result.warnings)
+        html = build_html(s, renderer, result.warnings, timings=t)  # once, for the HTML and the PDF
+        t.start_phase("export")
+        with t.step("Write", "HTML file", output_name(s, "html")):
+            (a.out / output_name(s, "html")).write_text(html, encoding="utf-8")
         if a.pdf:
-            write_pdf(s, renderer, a.out / output_name(s, "pdf"), result.warnings)
+            write_pdf(s, renderer, a.out / output_name(s, "pdf"), result.warnings, t, html=html)
     finally:
         renderer.close()
     if a.csv:
-        write_residuals(s, a.out / output_name(s, "residuals"), result.windows)
-        write_summary(s, a.out / output_name(s, "summary"), result.windows)
+        with t.step("Write", "Residuals and summary CSV"):
+            write_residuals(s, a.out / output_name(s, "residuals"), result.windows)
+            write_summary(s, a.out / output_name(s, "summary"), result.windows)
 
     print()
     print(f"{'dataset':38} {'check':5} {'comp':4} {'group':10} {'n':>3} {'mean':>8} {'sd':>8} {'rmse':>8}")
@@ -144,6 +150,7 @@ def cmd_run(a) -> int:
               f"median {o.median:+.3f} n {o.n} ({o.above} above, {o.below} below)")
     for line in section_lines(s, result.windows):
         print(line)
+    print(f"\nProcessing times\n{t.table()}")
     print(f"\nResults written to {a.out}")
     return 0
 
@@ -200,7 +207,8 @@ def cmd_batch(a) -> int:
     items = run_batch(template, a.projects, _settings_from_defaults(app, a.tol_z, a.tol_xy), options)
     print()
     for it in items:
-        print(f"{it.status.upper():8} {it.project.name}" + (f"  ({it.message})" if it.message else ""))
+        took = f"  [{fmt_seconds(it.seconds)}]" if it.timings.steps else ""
+        print(f"{it.status.upper():8} {it.project.name}{took}" + (f"  ({it.message})" if it.message else ""))
         for h in it.headline:
             print(f"         {h}")
     rc = 0 if all(it.status != "failed" for it in items) else 1
