@@ -5,6 +5,25 @@ All notable changes to RealityCheck. Format based on
 
 ## [0.4.0] - in development
 
+**Much faster on large datasets.** On a real site (a 93.6 million point
+cloud, a 1 GB orthomosaic and 478 spot heights) a full run with HTML, PDF and
+CSV output went from about **7 minutes to 25 seconds**. Most of that time was
+lost in 0.2 and 0.3 too, so every user with large point clouds, large
+orthomosaics or many spot heights gets the speed-up. Cross sections and
+processing times are new. Cross sections are a horizontal check without
+targets. Processing times show where a run spends its time.
+
+### Performance
+Measured on the dataset above, step by step (the new processing times show
+these for your own data):
+
+| Step | 0.3.1 | 0.4.0 | Why it was slow |
+|---|---|---|---|
+| Reading the point cloud | about 6 min | 20 s | Every point was tested against every spot height and control point window in turn. Each chunk of points is now sorted once, so a window only looks at its own strip. |
+| Site overview background | 25 s (twice) | 0.2 s | The orthomosaic was read in a way that skipped the file's overviews, so the whole-site map resampled every full-resolution pixel. Only the part inside the raster is read now, from the overviews. |
+| Spot heights outside the data | 7.5 s | 14 ms | Each spot height was measured to every occupied cell of the cloud. A point inside the cloud is now found by a lookup. |
+| Report for HTML and PDF | built twice | built once | The command line and Batch rebuilt the whole report for the PDF. |
+
 ### Added
 - Update notice: at start RealityCheck asks GitHub for the latest release and,
   if it is newer, shows a notice with what's new and a *Download* button
@@ -53,20 +72,24 @@ All notable changes to RealityCheck. Format based on
   the GCP / checkpoint flag (1 = GCP, as in a Metashape marker export). Before,
   it was ignored and every point was "unknown". A fifth column of text is the
   code.
-- Faster, found with the processing times. Measured on a 93.6 M point cloud,
-  a 1 GB orthomosaic and 478 spot heights, a full run with HTML, PDF and CSV
-  went from about 7 minutes to 25 seconds:
-  - The point cloud pass: 6 minutes to 20 seconds. Each chunk is sorted once,
-    so a window only tests the points in its own strip.
-  - The site overview's background: 25 s to 0.2 s. Only the part of the map
-    inside the orthomosaic or DEM is read, which lets GDAL use the file's
-    overviews.
-  - Spot heights outside the data: 7.5 s to 14 ms. A point inside the cloud
-    is found by looking its cell up, not by measuring to every cell.
-  - The command line and Batch build the report once for both the HTML and
-    the PDF, instead of twice.
+- Batch results name the surface in full ("Point cloud Z RMSE", not "Cloud Z
+  RMSE"), as the report does.
+
+### Removed
+- The tkinter file dialog fallback, which could never be used on Windows (the
+  Windows dialogs always are). The download no longer carries Tcl/Tk and is
+  7.6 MB smaller.
+- Unused code found in a review: a cloud header summary of which only the
+  coordinate system was ever read, an unused batch count of points over
+  tolerance (computed for every project, never shown), unused constants, and
+  duplicate copies of the dataset names, the "nice number" rounding and the
+  run settings built from `settings.json`.
 
 ### Fixed
+- Items to review said "outside the dem" and "no data in the dem"; it is
+  "DEM" now.
+- The point cloud class switches on the Setup tab could act on the wrong
+  cloud's class list when a session had more than one point cloud.
 - Opening a session whose data files have moved gave an unhandled error; it
   now says which file could not be read and keeps the open session.
 - In browser mode RealityCheck kept running in the background after its tab
