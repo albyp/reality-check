@@ -17,7 +17,6 @@ import numpy as np
 from pyproj import CRS
 
 LAS_SUFFIXES = {".las", ".laz"}
-XYZ_SUFFIXES = {".xyz", ".txt", ".csv", ".pts"}
 
 # ASPRS standard class names (LAS 1.4, R15).
 CLASS_NAMES = {
@@ -69,16 +68,6 @@ class Chunk:
 
 
 @dataclass
-class CloudInfo:
-    path: str
-    point_count: int | None
-    bounds: tuple[float, float, float, float] | None  # minx, miny, maxx, maxy
-    crs: CRS | None
-    has_rgb: bool
-    has_intensity: bool
-
-
-@dataclass
 class XYZColumns:
     """Column indices for ASCII point clouds. r, g, b are optional."""
 
@@ -94,24 +83,15 @@ def _is_las(path: str | Path) -> bool:
     return Path(path).suffix.lower() in LAS_SUFFIXES
 
 
-def cloud_info(path: str) -> CloudInfo:
-    if _is_las(path):
-        with laspy.open(path) as r:
-            h = r.header
-            try:
-                crs = h.parse_crs()
-            except Exception:
-                crs = None
-            dims = set(h.point_format.dimension_names)
-            return CloudInfo(
-                path,
-                h.point_count,
-                (h.mins[0], h.mins[1], h.maxs[0], h.maxs[1]),
-                crs,
-                "red" in dims,
-                "intensity" in dims,
-            )
-    return CloudInfo(path, None, None, None, has_rgb=True, has_intensity=False)
+def cloud_crs(path: str) -> CRS | None:
+    """The coordinate system in a LAS/LAZ header, or None (none recorded, or an ASCII cloud)."""
+    if not _is_las(path):
+        return None
+    with laspy.open(path) as r:
+        try:
+            return r.header.parse_crs()
+        except Exception:  # noqa: BLE001 - a damaged or unusual CRS record means "not known"
+            return None
 
 
 def _rgb8(red, green, blue) -> np.ndarray:
