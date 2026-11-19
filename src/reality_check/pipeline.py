@@ -21,6 +21,7 @@ from reality_check.crs import CRSLibrary, describe, same_horizontal_crs
 from reality_check.models import Dataset, DatasetKind, Role
 from reality_check.raster import raster_info
 from reality_check.review import SPOT_PREFIX, recompute_cloud_z
+from reality_check.sections import corridor_windows, find_sections
 from reality_check.session import Session, Settings
 
 Progress = Callable[[str], None]
@@ -68,6 +69,8 @@ def run(
         for p in session.spots:
             p.role = Role.UNKNOWN  # a GCP / checkpoint column means nothing for spot heights
         progress(f"Loaded {len(session.spots)} spot heights from {spots_path}")
+        for sec in find_sections(session.spots, settings.section_codes):
+            progress(f"  Cross section {sec.code}: {len(sec.nodes)} points, {sec.length:.1f} m")
     _apply_control_crs(session, crs_library, progress)
     result = RunResult(session)
     result.warnings = check_crs(datasets, progress)
@@ -123,8 +126,9 @@ def disregard_far_spots(session: Session, coverages: dict[str, Coverage], progre
 def load_windows(session: Session, progress: Progress = print,
                  coverages: dict[str, Coverage] | None = None) -> dict[str, dict[str, Chunk]]:
     """Stream each point cloud once and keep the points around every control point
-    and spot height (spot heights under SPOT_PREFIX + id). If coverages is given,
-    also fill it with where each cloud has points."""
+    and spot height (spot heights under SPOT_PREFIX + id), and along every cross
+    section (SECTION_PREFIX). If coverages is given, also fill it with where each
+    cloud has points."""
     half = max(MAX_CHIP_SIZE / 2, session.settings.cloud_radius)
     spot_half = max(SPOT_HALF, session.settings.cloud_radius)
     centres = {p.id: (p.x, p.y) for p in session.points}
@@ -132,6 +136,10 @@ def load_windows(session: Session, progress: Progress = print,
     for p in session.spots:
         centres[SPOT_PREFIX + p.id] = (p.x, p.y)
         halves[SPOT_PREFIX + p.id] = spot_half
+    for sec in find_sections(session.spots, session.settings.section_codes):
+        wins, h = corridor_windows(sec, session.settings.section_width)
+        centres.update(wins)
+        halves.update(dict.fromkeys(wins, h))
     out = {}
     for ds in session.datasets:
         if ds.kind is not DatasetKind.CLOUD:
