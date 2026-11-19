@@ -176,6 +176,7 @@ class Coverage:
 
     res: float
     cells: np.ndarray  # (n, 2) int64 cell indices (floor(x / res), floor(y / res))
+    _keys: np.ndarray | None = field(default=None, repr=False)  # cells packed and sorted, for a fast inside test
 
     def distance(self, x: float, y: float) -> float | None:
         """Plan distance from (x, y) to the nearest point, to within one cell
@@ -183,6 +184,14 @@ class Coverage:
         if len(self.cells) == 0:
             return None
         ix, iy = np.floor(x / self.res), np.floor(y / self.res)
+        # Most points asked about are inside the cloud: look their cell up first, rather than measuring to
+        # every occupied cell (hundreds of thousands on a large site).
+        if self._keys is None:
+            self._keys = np.sort(((self.cells[:, 0] + _KEY_OFFSET) << 32) | (self.cells[:, 1] + _KEY_OFFSET))
+        key = ((int(ix) + _KEY_OFFSET) << 32) | (int(iy) + _KEY_OFFSET)
+        i = np.searchsorted(self._keys, key)
+        if i < len(self._keys) and self._keys[i] == key:
+            return 0.0
         # Gap in whole cells between (x, y)'s cell and each occupied cell, per axis.
         gx = np.maximum(np.abs(self.cells[:, 0] - ix) - 1, 0)
         gy = np.maximum(np.abs(self.cells[:, 1] - iy) - 1, 0)
