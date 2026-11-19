@@ -21,8 +21,35 @@ All notable changes to RealityCheck. Format based on
 - README: an Automation section (Metashape batch, a watch-folder script for
   Pix4D or any other software, Pix4Dmapper's command line) and an Updates
   section.
+- Cross sections: spot heights coded `CS1`, `CS2` … (`section_codes`,
+  default `CS*`) are strings, joined in file order and taken out of the spot
+  heights table. Each gets a profile chart in the report (point cloud
+  corridor points, the cloud's median, the DEM, the surveyed points, with the
+  vertical exaggeration), dZ per point, and a best fit: how far along the
+  section and how far up or down the surface has to move to match the
+  surveyed shape, a horizontal check without a target where the ground has
+  shape. *Join cross-section points* on the Report tab (saved with the
+  session) draws or hides the line through the surveyed points. Sections are
+  drawn on the site overview, listed in the inputs, in the CSV exports (role
+  `section`, `section <code>` summary rows with `shift_along` and
+  `vertical_after_shift`), the batch results and the command line output
+  (`--section-codes`, `--section-width`, `--no-section-join`). Codes and
+  corridor width are on the Settings tab.
+- A code column in control point and spot height files (`Code`,
+  `Description`, `Feature` …), kept with each point and in the residuals CSV.
+
+### Changed
+- In a file without a header, a fifth column of only 0 and 1 is now read as
+  the GCP / checkpoint flag (1 = GCP, as in a Metashape marker export). Before,
+  it was ignored and every point was "unknown". A fifth column of text is the
+  code.
+- The point cloud pass is much faster with many spot heights: 93 M points with
+  478 spot heights took 6 minutes and now take 30 seconds. Each chunk is
+  sorted once, so a window only tests the points in its own strip.
 
 ### Fixed
+- Opening a session whose data files have moved gave an unhandled error; it
+  now says which file could not be read and keeps the open session.
 - In browser mode RealityCheck kept running in the background after its tab
   was closed. It now stops about 10 seconds after the last tab closes (a
   reload is not a close), and a *Quit* button stops it at once. The browser
