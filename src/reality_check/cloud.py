@@ -239,11 +239,20 @@ def sample_windows(
         near = (ch.x >= gx0) & (ch.x <= gx1) & (ch.y >= gy0) & (ch.y <= gy1)
         if not near.any():
             continue
+        # Sort once by X, so each window only tests the narrow strip of points in its X range.
+        # With hundreds of spot heights across a site this is what keeps one pass fast.
         sub = ch.subset(near)
+        order = np.argsort(sub.x, kind="stable")
+        sub = sub.subset(order)
+        lo = np.searchsorted(sub.x, cx - hs, side="left")
+        hi = np.searchsorted(sub.x, cx + hs, side="right")
         for i, pid in enumerate(ids):
-            m = (np.abs(sub.x - cx[i]) <= hs[i]) & (np.abs(sub.y - cy[i]) <= hs[i])
+            if hi[i] <= lo[i]:
+                continue
+            strip = slice(lo[i], hi[i])
+            m = np.abs(sub.y[strip] - cy[i]) <= hs[i]
             if m.any():
-                parts[pid].append(sub.subset(m))
+                parts[pid].append(sub.subset(np.arange(lo[i], hi[i])[m]))
     cov = None
     if coverage:
         keys = np.unique(np.concatenate(cells)) if cells else np.empty(0, np.int64)
