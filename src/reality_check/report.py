@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import itertools
 import logging
+import math
 import os
 import re
 import shutil
@@ -23,6 +24,8 @@ from reality_check.raster import raster_info
 from reality_check.render import ChipRenderer, to_data_url
 from reality_check.review import point_results
 from reality_check.overview import PX_PER_MM, render_overview
+from reality_check.sectionplot import section_svg
+from reality_check.sections import BIN, SectionResult, analyse, plain_spots
 from reality_check.session import Session, project_title
 from reality_check.stats import LEVEL, Stats, summarise, trim_note, z_offsets
 
@@ -45,7 +48,7 @@ STATUS_LABEL = {
 CSS = """
 /* Bahnschrift has no ±, …, ✓, ✗, ², ≈, ▲ or ▼ in print; take those from Segoe UI, keep DIN lettering for the rest. */
 @font-face { font-family:"Plumb Symbols"; src:local("Segoe UI Symbol"), local("Segoe UI"), local("Arial");
-             unicode-range:U+00B1, U+00B2, U+00B3, U+00D7, U+2026, U+2212, U+2248, U+2713, U+2717, U+25B2, U+25BC, U+25EF; }
+             unicode-range:U+00B1, U+00B2, U+00B3, U+00D7, U+2026, U+2212, U+2248, U+2713, U+2717, U+25B2, U+25BC, U+25C7, U+25EF; }
 :root { --ink:#111; --mid:#555; --hair:#bdbdbd; --red:#c8102e;
         --w1:0.18mm; --w2:0.25mm; --w3:0.35mm; --w5:0.5mm; --w7:0.7mm;
         --sans:"Plumb Symbols", "Bahnschrift", "DIN Alternate", "Arial Narrow", Arial, sans-serif;
@@ -139,6 +142,18 @@ ul.disregarded { margin:.6mm 0 0; padding-left:5mm; }
 figure.overview { margin:0; break-inside:avoid; border:var(--w5) solid var(--ink); }
 figure.overview img { width:100%; display:block; }
 figure.overview figcaption { font-size:7pt; color:var(--mid); padding:1mm 2.2mm 1.2mm; border-top:var(--w2) solid var(--ink); }
+
+/* Cross sections: one ruled box per section, the chart full width, then its results. */
+.xs { border:var(--w5) solid var(--ink); margin:0 0 4mm; break-inside:avoid; }
+.xs header { display:flex; flex-wrap:wrap; align-items:baseline; gap:1mm; padding:1.2mm 2mm;
+             border-bottom:var(--w3) solid var(--ink); }
+.xs h3 { border:var(--w5) solid var(--ink); padding:0 1.5mm; margin-right:1mm; }
+.xs header .sm { margin-left:auto; margin-top:0; }
+.xs svg.cs { display:block; width:100%; height:auto; }
+.xs .body { padding:0 2mm 2mm; }
+.xs .legend { font-size:6.5pt; color:var(--mid); padding:.6mm 2mm 1.4mm; border-bottom:var(--w2) solid var(--ink); }
+.xs table { margin-top:2mm; }
+.nojoin .cs-join { display:none; }
 .note { font-size:7pt; color:var(--mid); margin:1.4mm 0 0; }
 
 /* Sign-off: a ruled schedule, so names, signatures and dates line up whatever is filled in. */
@@ -323,6 +338,8 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
     xy_ds = [d for d in session.datasets if any(o.dataset_id == d.id and o.check is CheckKind.XY
                                                   for o in session.observations)]
     title = title or project_title(session)
+    sections = analyse(session, renderer.windows) if session.spots else []
+    spots = plain_spots(session)
     generated = f"{datetime.now():%d %b %Y %H:%M}"
     control = Path(session.control_path).name
     tol = []
@@ -353,9 +370,14 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
                                  f"{sum(p.enabled for p in session.points)} enabled)")]
     if session.spots_path:
         gone = len(session.spots_disregarded)
-        inputs.append(("Spot heights", f"{_e(Path(session.spots_path).name)} ({len(session.spots)} points"
+        inputs.append(("Spot heights", f"{_e(Path(session.spots_path).name)} ({len(spots)} points"
                        f"{f', {gone} disregarded (more than {s.spot_max_outside:g} m outside the data)' if gone else ''}; "
                        "Z only)"))
+        if sections:
+            names = ", ".join(f"{_e(r.section.code)} ({len(r.section.nodes)} points, {r.section.length:.1f} m)"
+                              for r in sections)
+            inputs.append(("Cross sections", f"{names}; codes {_e(s.section_codes)}; cloud corridor "
+                                             f"{s.section_width:g} m wide"))
     for d in session.datasets:
         inputs.append((KIND_LABEL[d.kind], f"{_e(Path(d.path).name)} <span class='muted'>· {_e(_crs_text(d))}</span>"))
     classes = s.cloud_classes
@@ -405,7 +427,7 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
             template = "30mm " + template
         w(f"<div class='sched' style='grid-template-columns:{template}'>{''.join(cells)}</div>")
     offsets = z_offsets(session.points, session.observations, s.trim)
-    spot_offsets = z_offsets(session.spots, session.spot_observations, s.trim, spots=True)
+    spot_offsets = z_offsets(spots, session.spot_observations, s.trim, spots=True)
     if offsets or spot_offsets:
         w("<ul class='offsets'>" + "".join(
             f"<li>{_e(o.sentence(OFFSET_LABEL[ds_by_id[o.dataset_id].kind]))}</li>"
@@ -478,9 +500,13 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
 
     if z_ds:
         w(_table_block(h2("Z comparison", "dZ = SURFACE − CONTROL"), *_z_table(session, results, z_ds, offsets)))
-    if z_ds and session.spots:
-        w(_table_block(h2("Spot heights", "dZ = SURFACE − SPOT HEIGHT"), *_spot_table(session, z_ds, spot_offsets),
+    if z_ds and spots:
+        w(_table_block(h2("Spot heights", "dZ = SURFACE − SPOT HEIGHT"),
+                       *_spot_table(session, spots, z_ds, spot_offsets),
                        rows_per_page=COMPACT_ROWS_PER_PAGE, css_class="compact"))
+    if z_ds and sections:
+        w(_sections_block(session, sections, ds_by_id,
+                          h2("Cross sections", "dZ = SURFACE − SURVEYED POINT · mm", "page-break")))
 
     if doc.named_signatories():
         w(f"<section class='block'>{h2('Sign-off')}{_signoff(doc)}</section>")
@@ -553,14 +579,15 @@ def _z_table(session: Session, results, z_ds, offsets) -> tuple[str, list[str], 
     return head, rows, after
 
 
-def _spot_table(session: Session, z_ds, offsets) -> tuple[str, list[str], str]:
-    """Spot heights: compact, dZ only. Supporting evidence for a shift or a reprocess."""
+def _spot_table(session: Session, spots, z_ds, offsets) -> tuple[str, list[str], str]:
+    """Spot heights (those not in a cross section): compact, dZ only. Supporting evidence for a shift or a
+    reprocess."""
     star = "*" if session.settings.trim > 0 else ""
     obs = {(o.point_id, o.dataset_id): o for o in session.spot_observations if o.check is CheckKind.Z}
     head = "<th>SPOT</th><th class='n'>Z</th>" + "".join(
         f"<th class='n'>dZ {_caps(KIND_LABEL[d.kind])}</th>" for d in z_ds)
     rows = []
-    for p in session.spots:
+    for p in spots:
         if not p.enabled:  # disregarded: listed after the table
             continue
         cells = [f"<td>{_e(p.id)}</td><td class='n'>{p.z:.3f}</td>"]
@@ -578,7 +605,7 @@ def _spot_table(session: Session, z_ds, offsets) -> tuple[str, list[str], str]:
                  ("SD", lambda o, st: _mm(st.sd, False)),
                  ("RMSE", lambda o, st: _mm(st.rmse, False)),
                  ("n (above / below)", lambda o, st: f"{o.n} ({o.above} / {o.below})")]
-    stats = {d.id: Stats.of(o.z - p.z for p in session.spots
+    stats = {d.id: Stats.of(o.z - p.z for p in spots
                             if p.enabled and (o := obs.get((p.id, d.id))) is not None and o.status is ObsStatus.OK)
              for d in z_ds}
     for i, (label, cell) in enumerate(foot_rows):
@@ -601,6 +628,80 @@ def _spot_table(session: Session, z_ds, offsets) -> tuple[str, list[str], str]:
                   f"{session.settings.spot_max_outside:g} m outside the DEM and point cloud, so they are left out of "
                   f"the table and the averages:</p><ul class='disregarded note'>{items}</ul>")
     return head, rows, after
+
+
+def _sections_block(session: Session, sections: list[SectionResult], ds_by_id, heading: str) -> str:
+    """Each cross section: the profile chart, the fit per surface, then the surveyed points."""
+    s = session.settings
+    tol = s.tol_z
+    out = [f"<div class='sections{'' if s.section_join else ' nojoin'}'>{heading}"]
+    for r in sections:
+        sec = r.section
+        svg, ve = section_svg(r)
+        last = sec.nodes[-1].id
+        out.append(f"<section class='xs'><header><h3>{_e(sec.code)}</h3>"
+                   f"<span class='sm'>{len(sec.nodes)} surveyed points · {sec.length:.2f} m · "
+                   f"{_e(sec.nodes[0].id)} to {_e(last)}, bearing {sec.bearing():.0f}°</span></header>{svg}")
+        legend = ["◇ surveyed points<span class='cs-join'>, joined in survey order</span>"]
+        kinds = {p.kind for p in r.profiles}
+        if DatasetKind.DEM in kinds:
+            legend.append("— DEM")
+        if DatasetKind.CLOUD in kinds:
+            legend.append(f"· point cloud within {s.section_width / 2:g} m of the section, - - its median")
+        out.append(f"<div class='legend'>{' · '.join(legend)} · vertical exaggeration ×{ve:.0f}</div><div class='body'>")
+
+        # The fit per surface.
+        rows = []
+        for p in r.profiles:
+            f = r.fits.get(p.dataset_id)
+            name = _e(Path(ds_by_id[p.dataset_id].path).name)
+            if f is None:
+                rows.append(f"<tr><td>{name}</td><td class='n'>0</td><td colspan=5 class='muted'>No surface data "
+                            "along the section</td></tr>")
+                continue
+            if f.shift is None:
+                along, vert, note = "–", "–", f"No along-section fit: {_e(f.reason)}."
+            elif f.significant:
+                towards = f"towards {_e(last)}" if f.shift > 0 else f"towards {_e(sec.nodes[0].id)}"
+                along, vert = _mm(f.shift), _mm(f.vertical)
+                note = (f"The surface's shape matches best {abs(f.shift) * 1000:.0f} mm {towards} along the section "
+                        f"(spread of dZ {f.sd_before * 1000:.0f} → {f.sd_after * 1000:.0f} mm).")
+            else:
+                along, vert = "0", _mm(f.mean)
+                note = (f"No significant shift along the section: the best fit ({_mm(f.shift)} mm) only changes the "
+                        f"spread of dZ from {f.sd_before * 1000:.0f} to {f.sd_after * 1000:.0f} mm.")
+            rows.append(f"<tr><td>{name}</td><td class='n'>{f.n}</td><td class='n {_tol_class(f.mean, tol)}'>"
+                        f"{_mm(f.mean)}</td><td class='n'>{_mm(f.rmse, False)}</td><td class='n'>"
+                        f"{_mm(f.max_abs, False)}</td><td class='n'>{along}</td><td class='n'>{vert}</td>"
+                        f"<td>{note}</td></tr>")
+        out.append("<table><thead><tr><th>SURFACE</th><th class='n'>n</th><th class='n'>MEAN dZ</th>"
+                   "<th class='n'>RMSE</th><th class='n'>MAX |dZ|</th><th class='n'>ALONG</th>"
+                   "<th class='n'>VERTICAL</th><th>BEST FIT</th></tr></thead><tbody>" + "".join(rows)
+                   + "</tbody></table>")
+
+        # The surveyed points, compact.
+        head = "<th>POINT</th><th class='n'>CHAINAGE</th><th class='n'>Z</th>" + "".join(
+            f"<th class='n'>dZ {_caps(KIND_LABEL[p.kind])}</th>" for p in r.profiles)
+        body = []
+        for i, node in enumerate(sec.nodes):
+            cells = [f"<td>{_e(node.id)}{'' if node.enabled else ' <span class=muted>(off)</span>'}</td>"
+                     f"<td class='n'>{sec.chainage[i]:.2f}</td><td class='n'>{node.z:.3f}</td>"]
+            for p in r.profiles:
+                dz = r.dz[p.dataset_id][i]
+                cells.append("<td class='n muted'>No data</td>" if not math.isfinite(dz) else
+                             f"<td class='n {_tol_class(dz, tol)}'>{_mm(dz)}</td>")
+            body.append("<tr>" + "".join(cells) + "</tr>")
+        out.append(f"<div class='compact'><table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}"
+                   "</tbody></table></div></div></section>")
+    out.append(
+        "<p class='note'>A cross section is a string of spot heights with one code, joined in the order they were "
+        f"surveyed (codes {_e(s.section_codes)}). dZ in mm = surface minus surveyed point; for a point cloud it is the "
+        f"median of the corridor points within {BIN / 2:g} m of the point's chainage. ALONG is how far along the "
+        "section the surface has to move for its shape to match the surveyed string best (positive = towards the "
+        "last point), and VERTICAL the offset left after that move: a horizontal check without a target. It needs "
+        "ground with shape (kerbs, drains, windrows); a flat section, or a best fit that barely improves the match, "
+        "gives no shift. Two sections at right angles give both horizontal directions.</p></div>")
+    return "".join(out)
 
 
 def _above_below(dz: float) -> str:
