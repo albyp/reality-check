@@ -41,6 +41,8 @@ from reality_check.review import (
     set_not_found,
 )
 from reality_check.sections import section_ids
+from reality_check.timings import Timings
+from reality_check.timings import fmt as fmt_seconds
 from reality_check.session import SESSION_SUFFIX, Session, Settings, output_name
 from reality_check.templates import (
     DEFAULTS,
@@ -94,6 +96,7 @@ class State:
     edit_template: str = ""  # Settings: template open in the editor
     example_project: str = ""  # Settings: project folder the template editor browses and tests against
     open_on_start: str = ""  # session file to open when the page first loads (gui --open, batch --open)
+    timings: Timings = field(default_factory=Timings)  # processing times of the run (or opening) and the report
     update: updates.Release | None = None  # a newer release on GitHub
     update_checked: bool = False  # checked once per run
     update_hidden: bool = False  # "Not now"
@@ -286,7 +289,7 @@ def clear_all() -> None:
     S.inputs = {role: "" for role in ROLES}
     S.settings = _default_settings()
     S.session = S.session_path = S.selected = None
-    S.windows, S.warnings = {}, []
+    S.windows, S.warnings, S.timings = {}, [], Timings()
     S.project_dir, S.dirty = "", False
     gc.collect()  # drop the point cloud samples now, not later
     log.info("Cleared inputs and results")
@@ -507,9 +510,11 @@ async def load_session(path: str) -> None:
     # Read the data first: a moved or missing file leaves the current session as it was.
     S.busy = True
     n = ui.notification("Reading point clouds…", spinner=True, timeout=None)
+    t = Timings()
     try:
-        windows = await run.io_bound(load_windows, session, LOG.put)
-        warnings = await run.io_bound(check_crs, session.datasets, LOG.put)
+        windows = await run.io_bound(load_windows, session, LOG.put, None, t)
+        with t.step("Read", "Dataset headers and coordinate systems", f"{len(session.datasets)} files"):
+            warnings = await run.io_bound(check_crs, session.datasets, LOG.put)
     except Exception as e:  # noqa: BLE001
         log.exception("Could not read the data of session %s", path)
         ui.notify(f"Could not open the session: one of its data files could not be read ({e}). "
@@ -520,7 +525,7 @@ async def load_session(path: str) -> None:
         S.busy = False
         n.dismiss()
     S.session, S.session_path, S.settings = session, Path(path), session.settings
-    S.windows, S.warnings = windows, warnings
+    S.windows, S.warnings, S.timings = windows, warnings, t
     ds = {d.kind: d.path for d in session.datasets}
     S.inputs = {"control": session.control_path, "ortho": ds.get(DatasetKind.ORTHO, ""),
                 "dem": ds.get(DatasetKind.DEM, ""), "cloud": ds.get(DatasetKind.CLOUD, ""),
@@ -714,10 +719,13 @@ def setup_panel(panels, t_review) -> None:
                     run_btn.enable()
                     spinner.set_visibility(False)
                 S.session, S.windows, S.warnings = res.session, res.windows, res.warnings
+                S.timings = res.timings
                 S.session_path, S.dirty = None, True
                 S.selected = S.session.points[0].id if S.session.points else None
                 _new_renderer()
-                LOG.put("Done. Open the Review tab.")
+                LOG.put(f"Done in {fmt_seconds(S.timings.total)}. Open the Review tab.")
+                logging.getLogger("reality_check").info("Processing times:\n%s", S.timings.table())
+                timings_panel.refresh()
                 classes_box.refresh()
                 review_panel.refresh()
                 report_panel.refresh()
@@ -742,6 +750,26 @@ def setup_panel(panels, t_review) -> None:
                         log.push(LOG.get_nowait())
 
                 ui.timer(0.3, flush)
+            timings_panel()
+
+
+@ui.refreshable
+def timings_panel() -> None:
+    """How long each step took: the run (or opening the session), then the last report build and export."""
+    t = S.timings
+    if not t.steps:
+        return
+    groups = " · ".join(f"{g} {fmt_seconds(v)}" for g, v in t.by_group().items())
+    with ui.card().classes("w-full q-pa-none"):
+        with ui.expansion(f"Processing times · total {fmt_seconds(t.total)}", icon="timer",
+                          caption=groups).classes("w-full"):
+            rows = [{"step": s.group, "what": s.name, "detail": s.detail, "time": fmt_seconds(s.seconds),
+                     "phase": s.phase} for s in t.steps]
+            cols = [{"name": k, "label": k.upper(), "field": k, "align": "right" if k == "time" else "left"}
+                    for k in ("phase", "step", "what", "detail", "time")]
+            ui.table(columns=cols, rows=rows).props("dense flat bordered hide-bottom").classes("w-full text-xs")
+            ui.label("Report steps are from the last preview or export; a new build replaces them.").classes(
+                "text-caption text-grey-7")
 
 
 def _set_tol(attr: str, value) -> None:
@@ -1265,6 +1293,8 @@ def batch_table() -> None:
             text = "; ".join(item.headline) or item.message or res.problem() or "; ".join(res.notes)
             if item.headline and item.message:
                 text += f" ({item.message})"
+            if item.timings.steps:
+                text += f" · {fmt_seconds(item.seconds)}"
             ui.label(text).classes("text-caption" + (" text-negative" if "FAIL" in text else ""))
             with ui.row().classes("gap-1 no-wrap"):
                 report = next((o for o in item.outputs if o.lower().endswith((".pdf", ".html"))), None)
@@ -1308,10 +1338,11 @@ def settings_panel() -> None:
                              placeholder="CS*").classes("w-full").tooltip(
                 "Spot heights with a code matching one of these (comma-separated, * = anything, e.g. CS*, XS*) "
                 "make cross sections: one per code, joined in file order. Applies to the next run.")
-            width = ui.number("Cross sections: cloud corridor width (m)", value=d.section_width, min=0.05, max=5,
-                              step=0.05, format="%.2f").classes("w-full").tooltip(
+            width = ui.number("Cross sections: cloud corridor width (m, 0 = automatic)", value=d.section_width,
+                              min=0, max=5, step=0.05, format="%.2f").classes("w-full").tooltip(
                 "Point cloud points within half this distance of a cross section are drawn and used. "
-                "Applies to the next run.")
+                "0 = set from the point density: narrow for a dense cloud, wide for a sparse one "
+                "(0.1 to 2 m, about 8 points per 0.1 m along the section). Applies to the next run.")
             default_tpl = ui.select(_template_names(), value=app_.default_template, label="Default template"
                                     ).classes("w-full")
             TEMPLATE_SELECTS["default"] = default_tpl
@@ -1325,7 +1356,7 @@ def settings_panel() -> None:
                 d.trim = round(1 - kept / 100, 4)
                 d.spot_max_outside = 10.0 if outside.value in (None, "") else max(float(outside.value), 0.0)
                 d.section_codes = (codes.value or "").strip() or "CS*"
-                d.section_width = float(width.value or 0.5)
+                d.section_width = max(float(width.value or 0), 0.0)
                 if S.session is None:  # an open session keeps what its cloud windows were read with
                     S.settings.spot_max_outside = d.spot_max_outside
                     S.settings.section_codes, S.settings.section_width = d.section_codes, d.section_width
@@ -1573,6 +1604,7 @@ def report_panel() -> None:
             html = await run.io_bound(_build_report_html)
             frame._props["srcdoc"] = html
             frame.update()
+            timings_panel.refresh()
         finally:
             refresh_btn.props(remove="loading")
 
@@ -1595,6 +1627,7 @@ def report_panel() -> None:
             await run.io_bound(_export, kind, Path(path))
             log.info("Exported %s to %s", kind, path)
             ui.notify(f"Saved {path}", type="positive", multi_line=True)
+            timings_panel.refresh()
         except PermissionError as e:
             log.exception("Export %s to %s failed", kind, path)
             ui.notify(f"Could not write {Path(path).name}: {e}. Is it open in another program (Excel, a PDF viewer)?",
@@ -1682,26 +1715,31 @@ def _build_report_html() -> str:
     S.session.settings = S.settings
     renderer = ChipRenderer(S.session, S.windows)  # own readers: this runs in a worker thread
     try:
-        return build_html(S.session, renderer, S.warnings)
+        return build_html(S.session, renderer, S.warnings, timings=S.timings)
     finally:
         renderer.close()
 
 
 def _export(kind: str, path: Path) -> None:
     S.session.settings = S.settings
+    t = S.timings
     if kind in ("pdf", "html"):
         renderer = ChipRenderer(S.session, S.windows)
         try:
             if kind == "pdf":
-                write_pdf(S.session, renderer, path, S.warnings)
+                write_pdf(S.session, renderer, path, S.warnings, t)
             else:
-                path.write_text(build_html(S.session, renderer, S.warnings), encoding="utf-8")
+                html = build_html(S.session, renderer, S.warnings, timings=t)
+                t.start_phase("export")
+                with t.step("Write", "HTML file", path.name):
+                    path.write_text(html, encoding="utf-8")
         finally:
             renderer.close()
-    elif kind == "residuals":
-        write_residuals(S.session, path, S.windows)
     else:
-        write_summary(S.session, path, S.windows)
+        t.start_phase("export")
+        with t.step("Write", "Residuals CSV" if kind == "residuals" else "Summary CSV", path.name):
+            (write_residuals if kind == "residuals" else write_summary)(S.session, path, S.windows)
+    log.info("Processing times:\n%s", t.table())
 
 
 def _port_free(port: int) -> bool:
