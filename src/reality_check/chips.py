@@ -232,6 +232,9 @@ def annotate(
 
 
 def _nice_length(target: float) -> float:
+    """Largest 1/2/5 x 10^n not above target: a scale bar length or an exaggeration factor."""
+    if target <= 0:
+        return 1.0
     exp = math.floor(math.log10(target))
     for m in (5, 2, 1):
         if m * 10**exp <= target:

@@ -15,13 +15,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from reality_check.export import write_residuals, write_summary
-from reality_check.models import DatasetKind
+from reality_check.models import KIND_LABEL
 from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
-from reality_check.report import write_html, write_pdf
-from reality_check.review import point_results
+from reality_check.report import build_html, write_pdf
+from reality_check.sections import plain_spots, section_lines
 from reality_check.session import Settings, output_name
 from reality_check.stats import summarise, z_offsets
+from reality_check.timings import Timings
 from reality_check.templates import Resolution, Template, resolve
 
 log = logging.getLogger("reality_check")
@@ -45,7 +46,11 @@ class BatchResult:
     outputs: list[str] = field(default_factory=list)
     session_path: str = ""
     headline: list[str] = field(default_factory=list)  # e.g. "DEM Z RMSE 20 mm (checkpoints) PASS"
-    exceed_count: int = 0
+    timings: Timings = field(default_factory=Timings)  # every step of this project's run and outputs
+
+    @property
+    def seconds(self) -> float:
+        return self.timings.total
 
 
 def plan(template: Template, projects: list[str | Path]) -> list[BatchResult]:
@@ -63,7 +68,8 @@ def run_one(item: BatchResult, settings: Settings, options: BatchOptions, progre
                              [f["cloud"]] if "cloud" in f else [])
     project_settings = replace(settings, project_title=item.project.name)
     result = run(f["control"], datasets, project_settings, progress=progress, spots_path=f.get("spots"))
-    s = result.session
+    s, t = result.session, result.timings
+    item.timings = t
     out = Path(options.out_dir) if options.out_dir else item.project
     out.mkdir(parents=True, exist_ok=True)
 
@@ -74,29 +80,38 @@ def run_one(item: BatchResult, settings: Settings, options: BatchOptions, progre
     if options.pdf or options.html:
         renderer = ChipRenderer(s, result.windows)
         try:
+            html = build_html(s, renderer, result.warnings, timings=t)  # once, for the HTML and the PDF
+            t.start_phase("export")
             if options.html:
-                item.outputs.append(str(write_html(s, renderer, out / output_name(s, "html"), result.warnings)))
+                path = out / output_name(s, "html")
+                with t.step("Write", "HTML file", path.name):
+                    path.write_text(html, encoding="utf-8")
+                item.outputs.append(str(path))
             if options.pdf:
-                item.outputs.append(str(write_pdf(s, renderer, out / output_name(s, "pdf"), result.warnings)))
+                item.outputs.append(str(write_pdf(s, renderer, out / output_name(s, "pdf"), result.warnings, t,
+                                                  html=html)))
         finally:
             renderer.close()
     if options.csv:
-        for kind, writer in (("residuals", write_residuals), ("summary", write_summary)):
-            path = out / output_name(s, kind)
-            writer(s, path)
-            item.outputs.append(str(path))
+        if t.phase != "export":
+            t.start_phase("export")
+        with t.step("Write", "Residuals and summary CSV"):
+            for kind, writer in (("residuals", write_residuals), ("summary", write_summary)):
+                path = out / output_name(s, kind)
+                writer(s, path, result.windows)
+                item.outputs.append(str(path))
+    log.info("Processing times for %s:\n%s", item.project.name, t.table())
 
-    item.headline = _headline(s)
-    item.exceed_count = sum(1 for pr in point_results(s) if pr.point.enabled and pr.exceeds)
+    item.headline = _headline(s, result.windows)
     item.status = "done"
     missing = [r for r in ("ortho", "dem", "cloud") if r not in f]
     item.message = f"Not found: {', '.join(missing)}" if missing else ""
     return item
 
 
-def _headline(session) -> list[str]:
+def _headline(session, windows=None) -> list[str]:
     kind = {d.id: d.kind for d in session.datasets}
-    label = {DatasetKind.ORTHO: "Ortho", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "Cloud"}
+    label = KIND_LABEL
     rows = summarise(session.points, session.observations)
     out = []
     for ds in session.datasets:
@@ -108,9 +123,11 @@ def _headline(session) -> list[str]:
             verdict = "" if tol is None else (" PASS" if r.stats.rmse <= tol else " FAIL")
             group = "checkpoints" if r.group == "checkpoint" else "all points"
             out.append(f"{label[kind[ds.id]]} {name} RMSE {r.stats.rmse * 1000:.0f} mm ({group}){verdict}")
-    for o in z_offsets(session.spots, session.spot_observations, session.settings.trim, spots=True):
+    for o in z_offsets(plain_spots(session), session.spot_observations, session.settings.trim, spots=True):
         star = "*" if o.trim > 0 else ""
         out.append(f"{label[kind[o.dataset_id]]} vs {o.n} spot heights {o.mean * 1000:+.0f} mm{star}")
+    if windows is not None:
+        out += section_lines(session, windows, lambda d: label[d.kind])
     return out
 
 

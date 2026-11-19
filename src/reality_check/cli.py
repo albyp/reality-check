@@ -1,8 +1,9 @@
 """Command line interface.
 
-    reality-check gui
+    reality-check gui [--open SESSION]
+    reality-check SESSION.rcheck.json
     reality-check run --control gcp.csv --ortho ortho.tif --dem dem.tif --cloud cloud.laz --out results
-    reality-check batch --template "Exports folder" D:/Surveys/pit_a D:/Surveys/pit_b --pdf
+    reality-check batch --template "Exports folder" D:/Surveys/pit_a D:/Surveys/pit_b --pdf [--open]
     reality-check templates
     reality-check classes cloud.laz
     reality-check crs list | export FILE | import FILE
@@ -22,8 +23,10 @@ from reality_check.document import DocumentInfo
 from reality_check.export import write_residuals, write_summary
 from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
-from reality_check.report import write_html, write_pdf
-from reality_check.session import Settings, output_name
+from reality_check.report import build_html, write_pdf
+from reality_check.sections import plain_spots, section_lines
+from reality_check.timings import fmt as fmt_seconds
+from reality_check.session import SESSION_SUFFIX, Settings, output_name
 from reality_check.stats import summarise, z_offsets
 
 
@@ -48,6 +51,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "90%% trimmed mean; 0 = plain mean)")
     r.add_argument("--spot-max-outside", type=float, default=10.0,
                    help="disregard spot heights more than this many metres outside the data (default 10)")
+    r.add_argument("--section-codes", default="CS*",
+                   help="spot height codes that make cross sections, comma-separated wildcards (default CS*)")
+    r.add_argument("--section-width", type=float, default=0.0,
+                   help="cloud corridor width along a cross section, in metres (default 0: set from the "
+                        "point density)")
+    r.add_argument("--no-section-join", action="store_true",
+                   help="report: do not join the surveyed points of a cross section with a line")
     r.add_argument("--title", default="", help="project title (default: control file name)")
     r.add_argument("--radius", type=float, default=0.5, help="cloud Z search radius in metres (default 0.5)")
     r.add_argument("--classes", type=_ints, default=None, help="cloud classes to use, e.g. 2,11 (default all)")
@@ -64,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--browser", action="store_true", help="use a browser tab instead of the desktop window")
     g.add_argument("--port", type=int, default=8765, help="browser mode port (default 8765)")
     g.add_argument("--no-browser", action="store_true", help="browser mode: do not open a tab")
+    g.add_argument("--open", default="", metavar="SESSION", help="open this session file (.rcheck.json) for review")
 
     b = sub.add_parser("batch", help="run many project folders with one template")
     b.add_argument("projects", nargs="+", type=Path, help="project folders")
@@ -74,8 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--csv", action="store_true", help="write residuals and summary CSVs")
     b.add_argument("--tol-z", type=float, default=None, help="Z tolerance in metres (default: settings.json)")
     b.add_argument("--tol-xy", type=float, default=None, help="XY tolerance in metres (default: settings.json)")
+    b.add_argument("--open", action="store_true",
+                   help="when done, open the GUI on the first finished project's session for review")
 
-    t = sub.add_parser("templates", help="list project templates and where settings.json is")
+    sub.add_parser("templates", help="list project templates and where settings.json is")
 
     c = sub.add_parser("classes", help="list classes in a point cloud")
     c.add_argument("cloud")
@@ -99,24 +112,29 @@ def cmd_run(a) -> int:
     settings = Settings(
         project_title=a.title, cloud_radius=a.radius, cloud_classes=a.classes, control_crs=a.control_crs,
         tol_z=a.tol_z, tol_xy=a.tol_xy, report_chip_size=a.chip_size, trim=a.trim,
-        spot_max_outside=a.spot_max_outside,
+        spot_max_outside=a.spot_max_outside, section_codes=a.section_codes, section_width=a.section_width,
+        section_join=not a.no_section_join,
     )
     if a.document:
         settings.document = DocumentInfo.from_dict(json.loads(Path(a.document).read_text(encoding="utf-8")))
     a.out.mkdir(parents=True, exist_ok=True)
     result = run(a.control, datasets, settings, spots_path=a.spots)
-    s = result.session
+    s, t = result.session, result.timings
     s.save(a.out / output_name(s, "session"))
     renderer = ChipRenderer(s, result.windows)
     try:
-        write_html(s, renderer, a.out / output_name(s, "html"), result.warnings)
+        html = build_html(s, renderer, result.warnings, timings=t)  # once, for the HTML and the PDF
+        t.start_phase("export")
+        with t.step("Write", "HTML file", output_name(s, "html")):
+            (a.out / output_name(s, "html")).write_text(html, encoding="utf-8")
         if a.pdf:
-            write_pdf(s, renderer, a.out / output_name(s, "pdf"), result.warnings)
+            write_pdf(s, renderer, a.out / output_name(s, "pdf"), result.warnings, t, html=html)
     finally:
         renderer.close()
     if a.csv:
-        write_residuals(s, a.out / output_name(s, "residuals"))
-        write_summary(s, a.out / output_name(s, "summary"))
+        with t.step("Write", "Residuals and summary CSV"):
+            write_residuals(s, a.out / output_name(s, "residuals"), result.windows)
+            write_summary(s, a.out / output_name(s, "summary"), result.windows)
 
     print()
     print(f"{'dataset':38} {'check':5} {'comp':4} {'group':10} {'n':>3} {'mean':>8} {'sd':>8} {'rmse':>8}")
@@ -127,9 +145,12 @@ def cmd_run(a) -> int:
     bad = [o for o in s.observations if o.status.value != "ok"]
     for o in bad:
         print(f"  {o.point_id} in {o.dataset_id}: {o.status.value}")
-    for o in z_offsets(s.spots, s.spot_observations, settings.trim, spots=True):
+    for o in z_offsets(plain_spots(s), s.spot_observations, settings.trim, spots=True):
         print(f"{o.dataset_id:38} spot heights: offset {o.mean:+.3f}{'*' if o.trim else ''} "
               f"median {o.median:+.3f} n {o.n} ({o.above} above, {o.below} below)")
+    for line in section_lines(s, result.windows):
+        print(line)
+    print(f"\nProcessing times\n{t.table()}")
     print(f"\nResults written to {a.out}")
     return 0
 
@@ -162,13 +183,6 @@ def cmd_crs(a) -> int:
     return 0
 
 
-def _settings_from_defaults(app, tol_z=None, tol_xy=None) -> Settings:
-    d = app.defaults
-    return Settings(cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size, trim=d.trim,
-                    spot_max_outside=d.spot_max_outside, document=app.document.copy(),
-                    tol_z=d.tol_z if tol_z is None else tol_z, tol_xy=d.tol_xy if tol_xy is None else tol_xy)
-
-
 def cmd_batch(a) -> int:
     from reality_check import appsettings
     from reality_check.batch import BatchOptions, run_batch
@@ -182,13 +196,25 @@ def cmd_batch(a) -> int:
         return 2
     options = BatchOptions(pdf=a.pdf, html=a.html or not (a.pdf or a.csv), csv=a.csv, out_dir=a.out)
     print(f"Template: {template.name}")
-    items = run_batch(template, a.projects, _settings_from_defaults(app, a.tol_z, a.tol_xy), options)
+    items = run_batch(template, a.projects, app.run_settings(a.tol_z, a.tol_xy), options)
     print()
     for it in items:
-        print(f"{it.status.upper():8} {it.project.name}" + (f"  ({it.message})" if it.message else ""))
+        took = f"  [{fmt_seconds(it.seconds)}]" if it.timings.steps else ""
+        print(f"{it.status.upper():8} {it.project.name}{took}" + (f"  ({it.message})" if it.message else ""))
         for h in it.headline:
             print(f"         {h}")
-    return 0 if all(it.status != "failed" for it in items) else 1
+    rc = 0 if all(it.status != "failed" for it in items) else 1
+    if a.open:
+        done = [it for it in items if it.status == "done" and it.session_path]
+        if done:
+            from reality_check.gui import start_desktop
+
+            if len(done) > 1:
+                print(f"Opening {Path(done[0].session_path).name}; the other sessions are next to their reports.")
+            start_desktop(open_session=done[0].session_path)
+        else:
+            print("Nothing to open: no project finished.")
+    return rc
 
 
 def cmd_templates(a) -> int:
@@ -209,10 +235,13 @@ def cmd_templates(a) -> int:
 def cmd_gui(a) -> int:
     from reality_check.gui import start, start_desktop
 
+    if a.open and not Path(a.open).is_file():
+        print(f"error: session file not found: {a.open}", file=sys.stderr)
+        return 2
     if a.browser or a.no_browser:
-        start(port=a.port, show=not a.no_browser)
+        start(port=a.port, show=not a.no_browser, open_session=a.open)
     else:
-        start_desktop()
+        start_desktop(open_session=a.open)
     return 0
 
 
@@ -221,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
     double_clicked = not argv
     if double_clicked:  # started from Explorer: open the GUI
         argv = ["gui"]
+    elif len(argv) == 1 and argv[0].lower().endswith(SESSION_SUFFIX) and Path(argv[0]).is_file():
+        argv = ["gui", "--open", argv[0]]  # a session file opened with RealityCheck.exe (Open with, drag onto exe)
     a = build_parser().parse_args(argv)
     commands = {"run": cmd_run, "batch": cmd_batch, "templates": cmd_templates, "classes": cmd_classes,
                 "crs": cmd_crs, "gui": cmd_gui}

@@ -20,17 +20,17 @@ from pathlib import Path
 
 from nicegui import app, run, ui
 
-from reality_check import __version__, appsettings, windialogs
+from reality_check import __version__, appsettings, updates, windialogs
 from reality_check.batch import BatchOptions, BatchResult, plan, run_one
 from reality_check.cloud import CLASS_NAMES, Chunk, is_classified
 from reality_check.detect import detect
 from reality_check.document import SIGN_ROLES, DocumentInfo, Signatory
 from reality_check.export import write_residuals, write_summary
-from reality_check.models import CheckKind, DatasetKind, ObsSource, ObsStatus, Role
+from reality_check.models import KIND_LABEL, CheckKind, DatasetKind, ObsSource, ObsStatus, Role
 from reality_check.pipeline import check_crs, load_windows, make_datasets
 from reality_check.pipeline import run as run_pipeline
 from reality_check.render import ChipRenderer
-from reality_check.report import KIND_LABEL, build_html, write_pdf
+from reality_check.report import build_html, write_pdf
 from reality_check.review import (
     disable_outside_data,
     find_obs,
@@ -40,6 +40,9 @@ from reality_check.review import (
     set_manual_xy,
     set_not_found,
 )
+from reality_check.sections import section_ids
+from reality_check.timings import Timings
+from reality_check.timings import fmt as fmt_seconds
 from reality_check.session import SESSION_SUFFIX, Session, Settings, output_name
 from reality_check.templates import (
     DEFAULTS,
@@ -92,6 +95,11 @@ class State:
     batch_running: bool = False
     edit_template: str = ""  # Settings: template open in the editor
     example_project: str = ""  # Settings: project folder the template editor browses and tests against
+    open_on_start: str = ""  # session file to open when the page first loads (gui --open, batch --open)
+    timings: Timings = field(default_factory=Timings)  # processing times of the run (or opening) and the report
+    update: updates.Release | None = None  # a newer release on GitHub
+    update_checked: bool = False  # checked once per run
+    update_hidden: bool = False  # "Not now"
 
 
 S = State()
@@ -106,16 +114,10 @@ def app_settings() -> appsettings.AppSettings:
     if S.app is None:
         S.app = appsettings.load()
         if S.session is None:
-            S.settings = _default_settings()
+            S.settings = S.app.run_settings()
         S.template_name = S.template_name or S.app.default_template
         S.batch_template = S.batch_template or S.app.default_template
     return S.app
-
-
-def _default_settings() -> Settings:
-    d = app_settings().defaults
-    return Settings(tol_z=d.tol_z, tol_xy=d.tol_xy, cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size,
-                    trim=d.trim, spot_max_outside=d.spot_max_outside, document=app_settings().document.copy())
 
 
 def _template_names() -> list[str]:
@@ -150,6 +152,11 @@ _DROP_JS = """
 <script>
 window.addEventListener('dragover', e => e.preventDefault());
 window.addEventListener('drop', e => { e.preventDefault(); if (!window.pywebview) emitEvent('rc_drop_browser', {}); });
+// Browser mode: closing the tab ends RealityCheck (see _watch_clients), so ask
+// first when review work is unsaved. window.rcDirty is kept up to date by the page.
+window.addEventListener('beforeunload', e => {
+  if (window.rcDirty && !window.pywebview) { e.preventDefault(); e.returnValue = ''; }
+});
 </script>
 """
 
@@ -159,30 +166,10 @@ window.addEventListener('drop', e => { e.preventDefault(); if (!window.pywebview
 # In the desktop window, use pywebview's dialogs: they belong to the app window,
 # so they always open on top of it. In browser mode, use the Windows dialogs
 # directly (windialogs), owned by the browser window so they open on top of it.
-# tkinter is the last resort (non-Windows development only): from a background
-# process its dialog can open behind the browser.
-
-def _tk_dialog(kind: str, title: str, types, initial: str = "", directory: str = "") -> str:
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        if kind == "folder":
-            return filedialog.askdirectory(parent=root, title=title, initialdir=directory or None)
-        if kind == "open":
-            return filedialog.askopenfilename(parent=root, title=title, filetypes=types, initialdir=directory or None)
-        return filedialog.asksaveasfilename(parent=root, title=title, filetypes=types, initialfile=initial,
-                                            initialdir=directory or None,
-                                            defaultextension=types[0][1].split()[0].lstrip("*"))
-    finally:
-        root.destroy()
-
+# File types are given as [("PDF", "*.pdf")] throughout.
 
 def _webview_types(types) -> tuple[str, ...]:
-    """tkinter-style [("PDF", "*.pdf")] to pywebview-style ("PDF (*.pdf)",)."""
+    """[("PDF", "*.pdf")] to pywebview-style ("PDF (*.pdf)",)."""
     return tuple(f"{label} ({';'.join(pattern.split())})" for label, pattern in types)
 
 
@@ -215,9 +202,9 @@ async def _dialog(kind: str, title: str, types, initial: str = "", directory: st
     try:
         if S.window is not None:
             return await run.io_bound(_webview_dialog, kind, types, initial, directory)
-        if windialogs.available():
-            return await run.io_bound(_win_dialog, kind, title, types, initial, directory)
-        return await run.io_bound(_tk_dialog, kind, title, types, initial, directory)
+        if not windialogs.available():
+            raise RuntimeError("no Windows file dialog on this system")
+        return await run.io_bound(_win_dialog, kind, title, types, initial, directory)
     except Exception as e:  # noqa: BLE001 - a dialog failure must never be silent
         log.exception("File dialog failed")
         ui.notify(f"Could not open the file dialog: {type(e).__name__}: {e}. You can paste a path into the box "
@@ -273,9 +260,9 @@ def clear_all() -> None:
         S.renderer.close()
     S.renderer = None
     S.inputs = {role: "" for role in ROLES}
-    S.settings = _default_settings()
+    S.settings = app_settings().run_settings()
     S.session = S.session_path = S.selected = None
-    S.windows, S.warnings = {}, []
+    S.windows, S.warnings, S.timings = {}, [], Timings()
     S.project_dir, S.dirty = "", False
     gc.collect()  # drop the point cloud samples now, not later
     log.info("Cleared inputs and results")
@@ -364,6 +351,9 @@ def index() -> None:
         ui.space()
         ui.button("Open session", icon="folder_open", on_click=lambda: open_session()).props("flat")
         ui.button("Save session", icon="save", on_click=lambda: save_session()).props("flat")
+        if not S.desktop:  # the desktop window ends RealityCheck when it closes; a browser tab needs a way out
+            ui.button("Quit", icon="power_settings_new", on_click=lambda: quit_app()).props("flat").tooltip(
+                "Close RealityCheck. Closing this tab does the same after a few seconds.")
 
     with ui.footer().classes("bg-white text-black q-px-md q-py-xs items-center rc-status"):
         status_session = ui.label().classes("rc-status")
@@ -371,7 +361,12 @@ def index() -> None:
         status_saved = ui.label().classes("rc-status")
         ui.label(f"PLUMB REALITYCHECK {__version__}").classes("rc-status q-ml-lg")
 
+    shown_dirty: list[bool | None] = [None]
+
     def update_status() -> None:
+        if shown_dirty[0] != S.dirty:  # for the browser's "leave site?" prompt
+            shown_dirty[0] = S.dirty
+            ui.run_javascript(f"window.rcDirty = {'true' if S.dirty else 'false'}")
         if S.session is None:
             status_session.set_text("NO SESSION · run the checks on the Setup tab")
             status_saved.set_text("")
@@ -393,6 +388,25 @@ def index() -> None:
             ui.label("To get the desktop window, install the Microsoft Edge WebView2 Runtime "
                      "(https://developer.microsoft.com/microsoft-edge/webview2/), then restart RealityCheck. "
                      f"Reason: {S.fallback_reason}").classes("text-caption text-grey-8")
+    update_notice()
+    if not S.update_checked:
+        S.update_checked = True
+        ui.timer(1.0, check_for_update, once=True)
+    if S.open_on_start:
+        client = ui.context.client
+
+        async def open_on_start() -> None:
+            # Wait for a page that is really open: a plain HTTP fetch of the page never connects.
+            # load_session ends by reloading the page, which needs the connection too.
+            try:
+                await client.connected(timeout=60)
+            except TimeoutError:
+                return
+            if S.open_on_start:
+                path, S.open_on_start = S.open_on_start, ""
+                await load_session(path)
+
+        ui.timer(0.1, open_on_start, once=True)
     with ui.tabs().classes("w-full bg-white text-primary").props("align=left inline-label") as tabs:
         t_setup = ui.tab("Setup", icon="tune")
         t_review = ui.tab("Review", icon="fact_check")
@@ -466,23 +480,121 @@ async def load_session(path: str) -> None:
         return
     if session.settings.document == DocumentInfo():  # saved before 0.3.1: start from the company details
         session.settings.document = app_settings().document.copy()
+    # Read the data first: a moved or missing file leaves the current session as it was.
+    S.busy = True
+    n = ui.notification("Reading point clouds…", spinner=True, timeout=None)
+    t = Timings()
+    try:
+        windows = await run.io_bound(load_windows, session, LOG.put, None, t)
+        with t.step("Read", "Dataset headers and coordinate systems", f"{len(session.datasets)} files"):
+            warnings = await run.io_bound(check_crs, session.datasets, LOG.put)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Could not read the data of session %s", path)
+        ui.notify(f"Could not open the session: one of its data files could not be read ({e}). "
+                  "Files that have moved need to be loaded again on the Setup tab.", type="negative",
+                  multi_line=True, timeout=0, close_button=True)
+        return
+    finally:
+        S.busy = False
+        n.dismiss()
     S.session, S.session_path, S.settings = session, Path(path), session.settings
+    S.windows, S.warnings, S.timings = windows, warnings, t
     ds = {d.kind: d.path for d in session.datasets}
     S.inputs = {"control": session.control_path, "ortho": ds.get(DatasetKind.ORTHO, ""),
                 "dem": ds.get(DatasetKind.DEM, ""), "cloud": ds.get(DatasetKind.CLOUD, ""),
                 "spots": session.spots_path}
-    S.busy = True
-    n = ui.notification("Reading point clouds…", spinner=True, timeout=None)
-    try:
-        S.windows = await run.io_bound(load_windows, session, LOG.put)
-        S.warnings = await run.io_bound(check_crs, session.datasets, LOG.put)
-    finally:
-        S.busy = False
-        n.dismiss()
     _new_renderer()
     S.selected = session.points[0].id if session.points else None
     S.dirty = False
     ui.navigate.reload()
+
+
+# ---------- update notice ----------
+
+async def check_for_update() -> None:
+    app_ = app_settings()
+    S.update = await run.io_bound(updates.available_update, app_.check_updates, app_.skipped_version)
+    if S.update:
+        log.info("Update available: %s", S.update.version)
+        update_notice.refresh()
+
+
+@ui.refreshable
+def update_notice() -> None:
+    rel = S.update
+    if rel is None or S.update_hidden:
+        return
+    import webbrowser
+
+    def not_now() -> None:
+        S.update_hidden = True
+        update_notice.refresh()
+
+    def skip() -> None:
+        app_settings().skipped_version = rel.version
+        _save_settings()
+        not_now()
+        ui.notify(f"You won't be told about {rel.version} again. Later versions will still show.")
+
+    with ui.card().classes("w-full q-pa-sm rc-update"):
+        with ui.row().classes("w-full items-center gap-3 no-wrap"):
+            ui.icon("system_update_alt").classes("text-h6")
+            with ui.column().classes("gap-0 grow"):
+                ui.label(f"RealityCheck {rel.version} is available. You have {__version__}.").classes(
+                    "text-body2 text-weight-medium")
+                ui.label("Download the zip from the release page. Close RealityCheck, then extract the zip over "
+                         "this copy: your settings.json (templates, defaults, company details) is kept."
+                         ).classes("text-caption text-grey-8")
+            ui.button("Download", icon="download", on_click=lambda: webbrowser.open(rel.url))
+            ui.button("Not now", on_click=not_now).props("flat")
+            ui.button("Skip this version", on_click=skip).props("flat")
+        notes = updates.summary(rel.notes)
+        if notes:
+            with ui.expansion("What's new").classes("w-full text-caption"):
+                ui.label(notes).classes("text-caption").style("white-space:pre-line")
+
+
+# ---------- quitting (browser mode) ----------
+
+QUIT_GRACE = 10  # s without any open tab before browser mode stops; covers a page reload
+
+
+async def quit_app() -> None:
+    if S.dirty and not await confirm("Quit without saving?", "The review work in this session has not been saved.",
+                                     "Quit"):
+        return
+    import asyncio
+
+    from nicegui import background_tasks
+
+    ui.run_javascript("window.rcDirty = false; document.body.innerHTML = "
+                      "'<p style=\"font:16px sans-serif;margin:40px\">RealityCheck has closed. "
+                      "You can close this tab.</p>'")
+
+    async def stop() -> None:  # a moment for the message to reach the tab
+        await asyncio.sleep(0.5)
+        app.shutdown()
+
+    background_tasks.create(stop(), name="quit")
+
+
+def _watch_clients() -> None:
+    """Browser mode: stop the server when no tab has been connected for QUIT_GRACE seconds.
+
+    Without this, closing the tab leaves RealityCheck running in the background.
+    The desktop window ends the process itself when it closes.
+    """
+    import asyncio
+
+    from nicegui import Client
+
+    async def on_disconnect() -> None:
+        await asyncio.sleep(QUIT_GRACE)
+        if not any(c.has_socket_connection for c in Client.instances.values()):
+            log.info("No RealityCheck tab open; stopping")
+            app.shutdown()
+
+    app.on_disconnect(on_disconnect)
 
 
 def apply_drop(paths: list[str]) -> None:
@@ -580,10 +692,13 @@ def setup_panel(panels, t_review) -> None:
                     run_btn.enable()
                     spinner.set_visibility(False)
                 S.session, S.windows, S.warnings = res.session, res.windows, res.warnings
+                S.timings = res.timings
                 S.session_path, S.dirty = None, True
                 S.selected = S.session.points[0].id if S.session.points else None
                 _new_renderer()
-                LOG.put("Done. Open the Review tab.")
+                LOG.put(f"Done in {fmt_seconds(S.timings.total)}. Open the Review tab.")
+                logging.getLogger("reality_check").info("Processing times:\n%s", S.timings.table())
+                timings_panel.refresh()
                 classes_box.refresh()
                 review_panel.refresh()
                 report_panel.refresh()
@@ -608,6 +723,26 @@ def setup_panel(panels, t_review) -> None:
                         log.push(LOG.get_nowait())
 
                 ui.timer(0.3, flush)
+            timings_panel()
+
+
+@ui.refreshable
+def timings_panel() -> None:
+    """How long each step took: the run (or opening the session), then the last report build and export."""
+    t = S.timings
+    if not t.steps:
+        return
+    groups = " · ".join(f"{g} {fmt_seconds(v)}" for g, v in t.by_group().items())
+    with ui.card().classes("w-full q-pa-none"):
+        with ui.expansion(f"Processing times · total {fmt_seconds(t.total)}", icon="timer",
+                          caption=groups).classes("w-full"):
+            rows = [{"step": s.group, "what": s.name, "detail": s.detail, "time": fmt_seconds(s.seconds),
+                     "phase": s.phase} for s in t.steps]
+            cols = [{"name": k, "label": k.upper(), "field": k, "align": "right" if k == "time" else "left"}
+                    for k in ("phase", "step", "what", "detail", "time")]
+            ui.table(columns=cols, rows=rows).props("dense flat bordered hide-bottom").classes("w-full text-xs")
+            ui.label("Report steps are from the last preview or export; a new build replaces them.").classes(
+                "text-caption text-grey-7")
 
 
 def _set_tol(attr: str, value) -> None:
@@ -744,7 +879,7 @@ def classes_box() -> None:
             ui.label("Only ticked classes are used for Z checks and chips.").classes("text-caption text-grey-7")
             active = set(S.settings.cloud_classes) if S.settings.cloud_classes is not None else set(counts)
 
-            def toggle(cls: int, on: bool) -> None:
+            def toggle(cls: int, on: bool, counts=counts) -> None:  # this cloud's classes, not the loop's last
                 current = set(S.settings.cloud_classes) if S.settings.cloud_classes is not None else set(counts)
                 current = current | {cls} if on else current - {cls}
                 S.settings.cloud_classes = None if current >= set(counts) else sorted(current)
@@ -1131,6 +1266,8 @@ def batch_table() -> None:
             text = "; ".join(item.headline) or item.message or res.problem() or "; ".join(res.notes)
             if item.headline and item.message:
                 text += f" ({item.message})"
+            if item.timings.steps:
+                text += f" · {fmt_seconds(item.seconds)}"
             ui.label(text).classes("text-caption" + (" text-negative" if "FAIL" in text else ""))
             with ui.row().classes("gap-1 no-wrap"):
                 report = next((o for o in item.outputs if o.lower().endswith((".pdf", ".html"))), None)
@@ -1170,6 +1307,15 @@ def settings_panel() -> None:
                                 value=d.spot_max_outside, min=0, step=1, format="%g").classes("w-full").tooltip(
                 "Spot heights further than this from the DEM and point cloud data are left out and listed "
                 "under the spot heights table. Applies to the next run (after Clear if a session is open).")
+            codes = ui.input("Cross sections: spot height codes", value=d.section_codes,
+                             placeholder="CS*").classes("w-full").tooltip(
+                "Spot heights with a code matching one of these (comma-separated, * = anything, e.g. CS*, XS*) "
+                "make cross sections: one per code, joined in file order. Applies to the next run.")
+            width = ui.number("Cross sections: cloud corridor width (m, 0 = automatic)", value=d.section_width,
+                              min=0, max=5, step=0.05, format="%.2f").classes("w-full").tooltip(
+                "Point cloud points within half this distance of a cross section are drawn and used. "
+                "0 = set from the point density: narrow for a dense cloud, wide for a sparse one "
+                "(0.1 to 2 m, about 8 points per 0.1 m along the section). Applies to the next run.")
             default_tpl = ui.select(_template_names(), value=app_.default_template, label="Default template"
                                     ).classes("w-full")
             TEMPLATE_SELECTS["default"] = default_tpl
@@ -1182,8 +1328,11 @@ def settings_panel() -> None:
                 kept = 100.0 if keep.value in (None, "") else min(max(float(keep.value), 50.0), 100.0)
                 d.trim = round(1 - kept / 100, 4)
                 d.spot_max_outside = 10.0 if outside.value in (None, "") else max(float(outside.value), 0.0)
-                if S.session is None:  # an open session keeps the limit its list was made with
+                d.section_codes = (codes.value or "").strip() or "CS*"
+                d.section_width = max(float(width.value or 0), 0.0)
+                if S.session is None:  # an open session keeps what its cloud windows were read with
                     S.settings.spot_max_outside = d.spot_max_outside
+                    S.settings.section_codes, S.settings.section_width = d.section_codes, d.section_width
                 app_.default_template = default_tpl.value or app_.default_template
                 _save_settings()
                 # The trim only changes how the report averages, so it applies to the open session too.
@@ -1194,6 +1343,17 @@ def settings_panel() -> None:
                 ui.notify("Defaults saved. They apply to new runs; the trimmed mean applies now.", type="positive")
 
             ui.button("Save defaults", icon="save", on_click=save_defaults)
+
+            def set_check(e) -> None:
+                app_.check_updates = bool(e.value)
+                if e.value:
+                    app_.skipped_version = ""  # turning it back on shows a skipped release again
+                _save_settings()
+
+            ui.separator().classes("q-my-sm")
+            ui.checkbox("Check for a new version at start", value=app_.check_updates, on_change=set_check).tooltip(
+                "Asks GitHub for the latest release when RealityCheck starts and shows a notice if it is newer. "
+                "Nothing is downloaded or installed.")
         with ui.card().classes("grow"):
             template_editor()
 
@@ -1390,6 +1550,18 @@ def report_panel() -> None:
         ui.select({s: f"{s:g} m" for s in CHIP_SIZES}, value=S.settings.report_chip_size, label="Report chip width",
                   on_change=lambda e: setattr(S.settings, "report_chip_size", e.value)).classes("w-40").props("dense")
         refresh_btn = ui.button("Refresh preview", icon="refresh")
+        if S.session.spots and section_ids(S.session):
+            def set_join(e) -> None:
+                S.settings.section_join = bool(e.value)
+                _mark_dirty()
+                # Show it at once in the preview; the next build and every export read the setting.
+                ui.run_javascript(
+                    "document.querySelectorAll('iframe').forEach(f => f.contentDocument && f.contentDocument"
+                    f".querySelectorAll('.sections').forEach(s => s.classList.toggle('nojoin', {'false' if e.value else 'true'})))")
+
+            ui.switch("Join cross-section points", value=S.settings.section_join, on_change=set_join).tooltip(
+                "Draw a line through the surveyed points of each cross section, in survey order. "
+                "Off: points only. Applies to the PDF and HTML too.")
         ui.space()
         ui.button("PDF", icon="picture_as_pdf", on_click=lambda: export("pdf"))
         ui.button("HTML", icon="code", on_click=lambda: export("html")).props("outline")
@@ -1405,6 +1577,7 @@ def report_panel() -> None:
             html = await run.io_bound(_build_report_html)
             frame._props["srcdoc"] = html
             frame.update()
+            timings_panel.refresh()
         finally:
             refresh_btn.props(remove="loading")
 
@@ -1427,6 +1600,7 @@ def report_panel() -> None:
             await run.io_bound(_export, kind, Path(path))
             log.info("Exported %s to %s", kind, path)
             ui.notify(f"Saved {path}", type="positive", multi_line=True)
+            timings_panel.refresh()
         except PermissionError as e:
             log.exception("Export %s to %s failed", kind, path)
             ui.notify(f"Could not write {Path(path).name}: {e}. Is it open in another program (Excel, a PDF viewer)?",
@@ -1514,26 +1688,31 @@ def _build_report_html() -> str:
     S.session.settings = S.settings
     renderer = ChipRenderer(S.session, S.windows)  # own readers: this runs in a worker thread
     try:
-        return build_html(S.session, renderer, S.warnings)
+        return build_html(S.session, renderer, S.warnings, timings=S.timings)
     finally:
         renderer.close()
 
 
 def _export(kind: str, path: Path) -> None:
     S.session.settings = S.settings
+    t = S.timings
     if kind in ("pdf", "html"):
         renderer = ChipRenderer(S.session, S.windows)
         try:
             if kind == "pdf":
-                write_pdf(S.session, renderer, path, S.warnings)
+                write_pdf(S.session, renderer, path, S.warnings, t)
             else:
-                path.write_text(build_html(S.session, renderer, S.warnings), encoding="utf-8")
+                html = build_html(S.session, renderer, S.warnings, timings=t)
+                t.start_phase("export")
+                with t.step("Write", "HTML file", path.name):
+                    path.write_text(html, encoding="utf-8")
         finally:
             renderer.close()
-    elif kind == "residuals":
-        write_residuals(S.session, path)
     else:
-        write_summary(S.session, path)
+        t.start_phase("export")
+        with t.step("Write", "Residuals CSV" if kind == "residuals" else "Summary CSV", path.name):
+            (write_residuals if kind == "residuals" else write_summary)(S.session, path, S.windows)
+    log.info("Processing times:\n%s", t.table())
 
 
 def _port_free(port: int) -> bool:
@@ -1553,26 +1732,30 @@ def _is_realitycheck(port: int) -> bool:
         return False
 
 
-def start(port: int = 8765, show: bool = True) -> None:
+def start(port: int = 8765, show: bool = True, open_session: str = "") -> None:
     """Browser mode: serve on localhost and open a browser tab."""
     import webbrowser
 
+    S.open_on_start = open_session or S.open_on_start
     if not _port_free(port):
-        if _is_realitycheck(port):
+        if _is_realitycheck(port) and not S.open_on_start:
             print(f"RealityCheck is already running at http://127.0.0.1:{port}/")
             if show:
                 webbrowser.open(f"http://127.0.0.1:{port}/")
             return
         port = next(p for p in range(port + 1, port + 100) if _port_free(p))
     app.on_shutdown(lambda: S.renderer and S.renderer.close())
+    if show:  # no tab of its own (--no-browser, tests): keep running
+        _watch_clients()
     ui.run(title="RealityCheck", host="127.0.0.1", port=port, reload=False, show=show,
            reconnect_timeout=30, uvicorn_logging_level="warning")
 
 
-def start_desktop() -> None:
+def start_desktop(open_session: str = "") -> None:
     """Desktop window with drag and drop. Falls back to the browser if WebView2 is missing."""
     from reality_check.desktop import run_desktop
 
+    S.open_on_start = open_session
     S.desktop = True
     try:
         run_desktop()

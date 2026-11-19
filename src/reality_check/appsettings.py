@@ -1,7 +1,7 @@
 """Application settings: settings.json next to the executable.
 
 Holds default values for new runs, the company details for the report title
-block and the project templates. The file is
+block, the project templates and the update check. The file is
 created on first use with the built-in templates, so it can be edited in the
 app (Settings tab) or by hand.
 
@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from reality_check.document import DocumentInfo
+from reality_check.session import Settings
 from reality_check.templates import Template, builtin_templates
 
 FILE_NAME = "settings.json"
@@ -36,6 +37,8 @@ class Defaults:
     report_chip_size: float = 2.0  # m
     trim: float = 0.10  # average offsets: fraction of dZ values left out (0.10 = 90% trimmed mean)
     spot_max_outside: float = 10.0  # m; spot heights further than this from all data are disregarded
+    section_codes: str = "CS*"  # spot height codes that make cross sections (comma-separated wildcards)
+    section_width: float = 0.0  # m; cloud corridor width along a cross section (0 = from the point density)
 
 
 @dataclass
@@ -45,6 +48,16 @@ class AppSettings:
     default_template: str = "Project root"
     templates: list[Template] = field(default_factory=builtin_templates)
     document: DocumentInfo = field(default_factory=DocumentInfo)  # company details every new report starts with
+    check_updates: bool = True  # look for a newer release on GitHub at start
+    skipped_version: str = ""  # the user chose "Skip this version" for this release
+
+    def run_settings(self, tol_z: float | None = None, tol_xy: float | None = None) -> Settings:
+        """Settings for a new run from the saved defaults and company details (tolerances can be overridden)."""
+        d = self.defaults
+        return Settings(tol_z=d.tol_z if tol_z is None else tol_z, tol_xy=d.tol_xy if tol_xy is None else tol_xy,
+                        cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size, trim=d.trim,
+                        spot_max_outside=d.spot_max_outside, section_codes=d.section_codes,
+                        section_width=d.section_width, document=self.document.copy())
 
     def template(self, name: str) -> Template | None:
         return next((t for t in self.templates if t.name == name), None)
@@ -92,6 +105,7 @@ class AppSettings:
             "default_template": self.default_template,
             "templates": [t.to_dict() for t in self.templates],
             "document": self.document.company_defaults().to_dict(),
+            "updates": {"check": self.check_updates, "skipped": self.skipped_version},
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
@@ -158,7 +172,9 @@ def load(path: Path | None = None) -> AppSettings:
     defaults = Defaults(**{k: v for k, v in d.get("defaults", {}).items() if k in known})
     templates = [_upgrade(t) for t in d.get("templates", [])] or builtin_templates()
     document = DocumentInfo.from_dict(d.get("document")).company_defaults()
-    return AppSettings(path, defaults, d.get("default_template", templates[0].name), templates, document)
+    upd = d.get("updates") or {}
+    return AppSettings(path, defaults, d.get("default_template", templates[0].name), templates, document,
+                       check_updates=bool(upd.get("check", True)), skipped_version=str(upd.get("skipped", "")))
 
 
 def _upgrade(raw: dict) -> Template:

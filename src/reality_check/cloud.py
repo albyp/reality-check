@@ -17,7 +17,6 @@ import numpy as np
 from pyproj import CRS
 
 LAS_SUFFIXES = {".las", ".laz"}
-XYZ_SUFFIXES = {".xyz", ".txt", ".csv", ".pts"}
 
 # ASPRS standard class names (LAS 1.4, R15).
 CLASS_NAMES = {
@@ -69,16 +68,6 @@ class Chunk:
 
 
 @dataclass
-class CloudInfo:
-    path: str
-    point_count: int | None
-    bounds: tuple[float, float, float, float] | None  # minx, miny, maxx, maxy
-    crs: CRS | None
-    has_rgb: bool
-    has_intensity: bool
-
-
-@dataclass
 class XYZColumns:
     """Column indices for ASCII point clouds. r, g, b are optional."""
 
@@ -94,24 +83,15 @@ def _is_las(path: str | Path) -> bool:
     return Path(path).suffix.lower() in LAS_SUFFIXES
 
 
-def cloud_info(path: str) -> CloudInfo:
-    if _is_las(path):
-        with laspy.open(path) as r:
-            h = r.header
-            try:
-                crs = h.parse_crs()
-            except Exception:
-                crs = None
-            dims = set(h.point_format.dimension_names)
-            return CloudInfo(
-                path,
-                h.point_count,
-                (h.mins[0], h.mins[1], h.maxs[0], h.maxs[1]),
-                crs,
-                "red" in dims,
-                "intensity" in dims,
-            )
-    return CloudInfo(path, None, None, None, has_rgb=True, has_intensity=False)
+def cloud_crs(path: str) -> CRS | None:
+    """The coordinate system in a LAS/LAZ header, or None (none recorded, or an ASCII cloud)."""
+    if not _is_las(path):
+        return None
+    with laspy.open(path) as r:
+        try:
+            return r.header.parse_crs()
+        except Exception:  # noqa: BLE001 - a damaged or unusual CRS record means "not known"
+            return None
 
 
 def _rgb8(red, green, blue) -> np.ndarray:
@@ -176,6 +156,7 @@ class Coverage:
 
     res: float
     cells: np.ndarray  # (n, 2) int64 cell indices (floor(x / res), floor(y / res))
+    _keys: np.ndarray | None = field(default=None, repr=False)  # cells packed and sorted, for a fast inside test
 
     def distance(self, x: float, y: float) -> float | None:
         """Plan distance from (x, y) to the nearest point, to within one cell
@@ -183,6 +164,14 @@ class Coverage:
         if len(self.cells) == 0:
             return None
         ix, iy = np.floor(x / self.res), np.floor(y / self.res)
+        # Most points asked about are inside the cloud: look their cell up first, rather than measuring to
+        # every occupied cell (hundreds of thousands on a large site).
+        if self._keys is None:
+            self._keys = np.sort(((self.cells[:, 0] + _KEY_OFFSET) << 32) | (self.cells[:, 1] + _KEY_OFFSET))
+        key = ((int(ix) + _KEY_OFFSET) << 32) | (int(iy) + _KEY_OFFSET)
+        i = np.searchsorted(self._keys, key)
+        if i < len(self._keys) and self._keys[i] == key:
+            return 0.0
         # Gap in whole cells between (x, y)'s cell and each occupied cell, per axis.
         gx = np.maximum(np.abs(self.cells[:, 0] - ix) - 1, 0)
         gy = np.maximum(np.abs(self.cells[:, 1] - iy) - 1, 0)
@@ -239,11 +228,20 @@ def sample_windows(
         near = (ch.x >= gx0) & (ch.x <= gx1) & (ch.y >= gy0) & (ch.y <= gy1)
         if not near.any():
             continue
+        # Sort once by X, so each window only tests the narrow strip of points in its X range.
+        # With hundreds of spot heights across a site this is what keeps one pass fast.
         sub = ch.subset(near)
+        order = np.argsort(sub.x, kind="stable")
+        sub = sub.subset(order)
+        lo = np.searchsorted(sub.x, cx - hs, side="left")
+        hi = np.searchsorted(sub.x, cx + hs, side="right")
         for i, pid in enumerate(ids):
-            m = (np.abs(sub.x - cx[i]) <= hs[i]) & (np.abs(sub.y - cy[i]) <= hs[i])
+            if hi[i] <= lo[i]:
+                continue
+            strip = slice(lo[i], hi[i])
+            m = np.abs(sub.y[strip] - cy[i]) <= hs[i]
             if m.any():
-                parts[pid].append(sub.subset(m))
+                parts[pid].append(sub.subset(np.arange(lo[i], hi[i])[m]))
     cov = None
     if coverage:
         keys = np.unique(np.concatenate(cells)) if cells else np.empty(0, np.int64)

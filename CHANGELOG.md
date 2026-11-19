@@ -3,6 +3,100 @@
 All notable changes to RealityCheck. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - 2026-11-19
+
+**Much faster on large datasets.** On a real site (a 93.6 million point
+cloud, a 1 GB orthomosaic and 478 spot heights) a full run with HTML, PDF and
+CSV output went from about **7 minutes to 25 seconds**. Most of that time was
+lost in 0.2 and 0.3 too, so every user with large point clouds, large
+orthomosaics or many spot heights gets the speed-up. Cross sections and
+processing times are new. Cross sections are a horizontal check without
+targets. Processing times show where a run spends its time.
+
+### Performance
+Measured on the dataset above, step by step (the new processing times show
+these for your own data):
+
+| Step | 0.3.1 | 0.4.0 | Why it was slow |
+|---|---|---|---|
+| Reading the point cloud | about 6 min | 20 s | Every point was tested against every spot height and control point window in turn. Each chunk of points is now sorted once, so a window only looks at its own strip. |
+| Site overview background | 25 s (twice) | 0.2 s | The orthomosaic was read in a way that skipped the file's overviews, so the whole-site map resampled every full-resolution pixel. Only the part inside the raster is read now, from the overviews. |
+| Spot heights outside the data | 7.5 s | 14 ms | Each spot height was measured to every occupied cell of the cloud. A point inside the cloud is now found by a lookup. |
+| Report for HTML and PDF | built twice | built once | The command line and Batch rebuilt the whole report for the PDF. |
+
+### Added
+- Update notice: at start RealityCheck asks GitHub for the latest release and,
+  if it is newer, shows a notice with what's new and a *Download* button
+  (opens the release page). *Not now* hides it for this run; *Skip this
+  version* until the next release. Nothing is downloaded or installed
+  automatically. Turn it off on the Settings tab or with
+  `"updates": {"check": false}` in `settings.json`.
+- Metashape Professional script (`scripts\metashape\realitycheck_batch.py`,
+  in the download) for the *Run Script* job of a Batch Process: runs
+  RealityCheck on the open project with your template (`--template`,
+  `--up`, `--pdf`, `--open`, …) after the export jobs.
+- `gui --open SESSION`, `batch … --open` (review the result when the batch
+  is done), and `RealityCheck.exe SESSION.rcheck.json` (*Open with*).
+- README: an Automation section (Metashape batch, a watch-folder script for
+  Pix4D or any other software, Pix4Dmapper's command line) and an Updates
+  section.
+- Cross sections: spot heights coded `CS1`, `CS2` … (`section_codes`,
+  default `CS*`) are strings, joined in file order and taken out of the spot
+  heights table. If the file order zig-zags (points picked up out of order or
+  added later), they are sorted along the section and the report says so.
+  Each section gets a profile chart in the report (point cloud corridor
+  points, the cloud's median, the DEM, the surveyed points, with the vertical
+  exaggeration), dZ per point, and a best fit: how far along the section and
+  how far up or down the surface has to move to match the surveyed shape, a
+  horizontal check without a target where the ground has shape. The cloud
+  corridor's width is set from the point density (0.1 to 2 m, about 8 points
+  per 0.1 m of section) unless a width is set. *Join cross-section points* on
+  the Report tab (saved with the session) draws or hides the line through the
+  surveyed points. On the site overview each section is a drawing-style
+  section mark, `/\___CS1___/\`, at least 22 mm long so a short section can
+  be found on a whole-site map. Sections are listed in the inputs, in the CSV
+  exports (role `section`, `section <code>` summary rows with `shift_along`
+  and `vertical_after_shift`), the batch results and the command line output
+  (`--section-codes`, `--section-width`, `--no-section-join`). Codes and
+  corridor width are on the Settings tab.
+- A code column in control point and spot height files (`Code`,
+  `Description`, `Feature` …), kept with each point and in the residuals CSV.
+- Processing times: how long each step took (reading each file, the checks,
+  the map, charts, tables and snapshots, each export) and the total. On the
+  Setup tab, in a dropdown at the end of the HTML report (screen only), at the
+  end of the command line output, per project on the Batch tab, and in the
+  log.
+
+### Changed
+- In a file without a header, a fifth column of only 0 and 1 is now read as
+  the GCP / checkpoint flag (1 = GCP, as in a Metashape marker export). Before,
+  it was ignored and every point was "unknown". A fifth column of text is the
+  code.
+- Batch results name the surface in full ("Point cloud Z RMSE", not "Cloud Z
+  RMSE"), as the report does.
+
+### Removed
+- The tkinter file dialog fallback, which could never be used on Windows (the
+  Windows dialogs always are). The download no longer carries Tcl/Tk and is
+  7.6 MB smaller.
+- Unused code found in a review: a cloud header summary of which only the
+  coordinate system was ever read, an unused batch count of points over
+  tolerance (computed for every project, never shown), unused constants, and
+  duplicate copies of the dataset names, the "nice number" rounding and the
+  run settings built from `settings.json`.
+
+### Fixed
+- Items to review said "outside the dem" and "no data in the dem"; it is
+  "DEM" now.
+- The point cloud class switches on the Setup tab could act on the wrong
+  cloud's class list when a session had more than one point cloud.
+- Opening a session whose data files have moved gave an unhandled error; it
+  now says which file could not be read and keeps the open session.
+- In browser mode RealityCheck kept running in the background after its tab
+  was closed. It now stops about 10 seconds after the last tab closes (a
+  reload is not a close), and a *Quit* button stops it at once. The browser
+  asks before closing the tab if review work is unsaved.
+
 ## [0.3.1] - 2026-11-03
 
 ### Added

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from reality_check.checks import z_from_cloud
 from reality_check.cloud import Chunk, filter_classes
 from reality_check.models import (
+    KIND_NOUN,
     CheckKind,
     ControlPoint,
     DatasetKind,
@@ -22,9 +23,7 @@ from reality_check.models import (
 )
 from reality_check.session import Session
 
-XY_KINDS = (DatasetKind.ORTHO, DatasetKind.CLOUD)
 SPOT_PREFIX = "spot:"  # spot height windows share the windows dict under this prefix (ids may clash)
-_KIND_NAME = {DatasetKind.ORTHO: "orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "point cloud"}
 
 
 def find_obs(session: Session, pid: str, ds_id: str, check: CheckKind) -> Observation | None:
@@ -143,7 +142,7 @@ def disable_outside_data(session: Session) -> list[str]:
 
 def point_results(session: Session) -> list[PointResult]:
     s = session.settings
-    names = {d.id: _KIND_NAME[d.kind] for d in session.datasets}
+    names = {d.id: KIND_NOUN[d.kind] for d in session.datasets}
     out = []
     for cp in session.points:
         dz, dxy, dx, dy, status, exceeds = {}, {}, {}, {}, {}, []
