@@ -20,6 +20,7 @@ from rasterio.windows import from_bounds
 from reality_check.chips import _font, _nice_length, hillshade
 from reality_check.models import CheckKind, DatasetKind, ObsStatus
 from reality_check.review import point_results
+from reality_check.sections import find_sections
 from reality_check.session import Session
 
 MARGIN = 0.04  # fraction of the extent added around the control points
@@ -224,10 +225,12 @@ def render_overview(session: Session) -> Overview:
     if dxys and max(dxys) > 0:
         factor = _nice_down(TARGET_ELLIPSE_MM / layout.scale / max(dxys))
 
+    strings = [(sec.code, [(p.x, p.y) for p in sec.nodes])
+               for sec in find_sections(session.spots, session.settings.section_codes)]
     images, source = [], "No imagery"
     for b in layout.tiles:
         tw, th = int((b[2] - b[0]) / mpp), int((b[3] - b[1]) / mpp)  # rounded down, so the strips fit the sheet
-        img, source = _tile(session, results, b, tw, th, mpp, xy_ds, z_ds, dz_limit, factor, font)
+        img, source = _tile(session, results, b, tw, th, mpp, xy_ds, z_ds, dz_limit, factor, font, strings)
         images.append(img)
 
     gap = round(GAP_MM * PX_PER_MM)
@@ -265,8 +268,9 @@ def _strip_label(img: Image.Image, x: int, y: int, size: tuple[int, int], number
     draw.text((x + pad, y + 3), str(number), fill=(255, 255, 255), font=font)
 
 
-def _tile(session, results, bounds, width, height, mpp, xy_ds, z_ds, dz_limit, factor, font):
-    """One strip of the map: background with every point inside it. Returns (image, source label)."""
+def _tile(session, results, bounds, width, height, mpp, xy_ds, z_ds, dz_limit, factor, font, strings=()):
+    """One strip of the map: background with every point inside it, and the cross sections (strings: code and
+    surveyed XY). Returns (image, source label)."""
     left, bottom, right, top = bounds
     img, source = _background(session, bounds, width, height)
     img = img.convert("RGBA")
@@ -275,6 +279,23 @@ def _tile(session, results, bounds, width, height, mpp, xy_ds, z_ds, dz_limit, f
 
     def to_px(x, y):
         return (x - left) / mpp, (top - y) / mpp
+
+    # Cross sections under the points: a black line cased in white so it reads on any imagery, labelled beside its
+    # middle (its ends often sit next to a control point).
+    for code, xy in strings:
+        line = [to_px(x, y) for x, y in xy]
+        if not any(0 <= px < width and 0 <= py < height for px, py in line):
+            continue
+        draw.line(line, fill=(255, 255, 255, 255), width=round(1.2 * PX_PER_MM), joint="curve")
+        draw.line(line, fill=(17, 17, 17, 255), width=round(0.5 * PX_PER_MM), joint="curve")
+        (sx, sy), (ex, ey) = line[0], line[-1]
+        n = math.hypot(ex - sx, ey - sy) or 1.0
+        px_, py_ = (sy - ey) / n, (ex - sx) / n  # perpendicular to the line
+        if px_ < 0:  # always the right-hand side on the page, so the text runs away from the line
+            px_, py_ = -px_, -py_
+        mx, my = (sx + ex) / 2 + px_ * 2 * PX_PER_MM, (sy + ey) / 2 + py_ * 2 * PX_PER_MM
+        draw.text((mx, my), code, fill=(255, 255, 255, 255), font=font, anchor="lm", stroke_width=3,
+                  stroke_fill=(0, 0, 0, 255))
 
     r_marker = round(MARKER_MM * PX_PER_MM)
     for pr in results:
