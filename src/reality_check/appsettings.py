@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from reality_check.document import DocumentInfo
+from reality_check.session import Settings
 from reality_check.templates import Template, builtin_templates
 
 FILE_NAME = "settings.json"
@@ -49,6 +50,14 @@ class AppSettings:
     document: DocumentInfo = field(default_factory=DocumentInfo)  # company details every new report starts with
     check_updates: bool = True  # look for a newer release on GitHub at start
     skipped_version: str = ""  # the user chose "Skip this version" for this release
+
+    def run_settings(self, tol_z: float | None = None, tol_xy: float | None = None) -> Settings:
+        """Settings for a new run from the saved defaults and company details (tolerances can be overridden)."""
+        d = self.defaults
+        return Settings(tol_z=d.tol_z if tol_z is None else tol_z, tol_xy=d.tol_xy if tol_xy is None else tol_xy,
+                        cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size, trim=d.trim,
+                        spot_max_outside=d.spot_max_outside, section_codes=d.section_codes,
+                        section_width=d.section_width, document=self.document.copy())
 
     def template(self, name: str) -> Template | None:
         return next((t for t in self.templates if t.name == name), None)
