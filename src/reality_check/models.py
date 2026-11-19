@@ -50,6 +50,7 @@ class ControlPoint:
     enabled: bool = True
     needs_touch_up: bool = False  # target should be repainted in the field
     note: str = ""
+    code: str = ""  # survey code from the file, e.g. "CS1" for a point on cross section 1
 
 
 @dataclass
