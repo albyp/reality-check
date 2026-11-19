@@ -15,11 +15,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from reality_check.export import write_residuals, write_summary
-from reality_check.models import DatasetKind
+from reality_check.models import KIND_LABEL
 from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
 from reality_check.report import build_html, write_pdf
-from reality_check.review import point_results
 from reality_check.sections import plain_spots, section_lines
 from reality_check.session import Settings, output_name
 from reality_check.stats import summarise, z_offsets
@@ -47,7 +46,6 @@ class BatchResult:
     outputs: list[str] = field(default_factory=list)
     session_path: str = ""
     headline: list[str] = field(default_factory=list)  # e.g. "DEM Z RMSE 20 mm (checkpoints) PASS"
-    exceed_count: int = 0
     timings: Timings = field(default_factory=Timings)  # every step of this project's run and outputs
 
     @property
@@ -105,7 +103,6 @@ def run_one(item: BatchResult, settings: Settings, options: BatchOptions, progre
     log.info("Processing times for %s:\n%s", item.project.name, t.table())
 
     item.headline = _headline(s, result.windows)
-    item.exceed_count = sum(1 for pr in point_results(s) if pr.point.enabled and pr.exceeds)
     item.status = "done"
     missing = [r for r in ("ortho", "dem", "cloud") if r not in f]
     item.message = f"Not found: {', '.join(missing)}" if missing else ""
@@ -114,7 +111,7 @@ def run_one(item: BatchResult, settings: Settings, options: BatchOptions, progre
 
 def _headline(session, windows=None) -> list[str]:
     kind = {d.id: d.kind for d in session.datasets}
-    label = {DatasetKind.ORTHO: "Ortho", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "Cloud"}
+    label = KIND_LABEL
     rows = summarise(session.points, session.observations)
     out = []
     for ds in session.datasets:
