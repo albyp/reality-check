@@ -3,7 +3,8 @@
 A cross section is a string of spot heights that share a code, for example
 CS1, CS2 (the pattern is settings.section_codes, "CS*" by default). The
 points are joined in the order they appear in the file, which is the order
-they were surveyed. Sections are most useful across ground with shape:
+they were surveyed, unless that order zig-zags (see survey_order). Sections
+are most useful across ground with shape:
 kerbs, windrows, drains, bund crests. There, a surface that sits too high,
 too low or shifted sideways shows clearly, where a flat spot height cannot.
 
@@ -13,7 +14,8 @@ Per section and surface:
   kerb top is not averaged with the road beside it, as the round cloud Z
   window of a spot height would).
 - The profile along the string: the DEM sampled every PROFILE_STEP, and the
-  cloud points within the corridor (settings.section_width wide).
+  cloud points within the corridor (settings.section_width wide, or chosen
+  from the point density when it is 0: see auto_width).
 - A best fit: how far along the section, and how far up or down, the surface
   has to move to match the surveyed string. Along-section shift is a
   horizontal check without a target. It is only reported where the section
@@ -45,12 +47,47 @@ MAX_SHIFT = 0.5  # m; best-fit search range along the section
 SHIFT_STEP = 0.005  # m
 MIN_RELIEF = 0.10  # m of shape about a straight line; with less, a shift along the section cannot be pinned down
 MAX_DRAWN_POINTS = 4000  # cloud points per section in the report chart
+# Corridor width 0 = automatic: the narrowest width (in WIDTH_STEP steps) that puts about POINTS_PER_BIN
+# cloud points in each BIN of chainage. A dense cloud gets a tight corridor (sharper edges), a sparse one a
+# wide corridor (enough points for a median).
+AUTO_MIN_WIDTH, AUTO_MAX_WIDTH, WIDTH_STEP = 0.1, 2.0, 0.05
+POINTS_PER_BIN = 8
+
+
+REORDER_RATIO = 1.25  # file order is kept unless its path is this much longer than the path sorted along the section
+
+
+def survey_order(nodes: list[ControlPoint]) -> tuple[list[ControlPoint], bool]:
+    """The points in the order to join them, and whether that differs from the file.
+
+    File order is the survey order and is normally right. When the file order zig-zags (points picked up out
+    of order, or added at the end later), its path is much longer than the path sorted along the section's main
+    direction; then the sorted order is used, starting from the end nearest the first point in the file. A
+    curved string in a sensible order is left alone, as sorting it would not shorten it.
+    """
+    if len(nodes) < 3:
+        return nodes, False
+    xy = np.array([(p.x, p.y) for p in nodes], float)
+    c = xy - xy.mean(axis=0)
+    axis = np.linalg.svd(c, full_matrices=False)[2][0]  # main direction of the points
+    t = c @ axis
+
+    def path(order) -> float:
+        return float(np.hypot(*np.diff(xy[order], axis=0).T).sum())
+
+    sorted_idx = np.argsort(t, kind="stable")
+    if t[0] > np.median(t):  # start from the end the file starts at
+        sorted_idx = sorted_idx[::-1]
+    if path(np.arange(len(nodes))) <= REORDER_RATIO * path(sorted_idx):
+        return nodes, False
+    return [nodes[i] for i in sorted_idx], True
 
 
 @dataclass
 class Section:
     code: str
-    nodes: list[ControlPoint]  # in file (survey) order
+    nodes: list[ControlPoint]  # in survey order (file order unless reordered)
+    reordered: bool = False  # the file order zig-zagged, so the points are sorted along the section
     chainage: np.ndarray = field(default_factory=lambda: np.zeros(0))  # m along the string, per node
 
     def __post_init__(self):
@@ -128,7 +165,7 @@ def find_sections(spots: list[ControlPoint], patterns: str) -> list[Section]:
     for p in spots:
         if code_matches(p.code, patterns):
             groups.setdefault(p.code.strip(), []).append(p)
-    return [Section(code, nodes) for code, nodes in groups.items() if len(nodes) >= 2]
+    return [Section(code, *survey_order(nodes)) for code, nodes in groups.items() if len(nodes) >= 2]
 
 
 def section_ids(session: Session) -> set[str]:
@@ -141,11 +178,27 @@ def plain_spots(session: Session) -> list[ControlPoint]:
     return [p for p in session.spots if p.id not in ids]
 
 
+def read_width(width: float) -> float:
+    """Corridor width the cloud pass has to read: the set width, or the widest automatic one."""
+    return width if width > 0 else AUTO_MAX_WIDTH
+
+
+def auto_width(ch: np.ndarray, off: np.ndarray, length: float) -> float:
+    """Automatic corridor width from the point density in the widest corridor (see POINTS_PER_BIN)."""
+    inside = (np.abs(off) <= AUTO_MAX_WIDTH / 2) & (ch >= 0) & (ch <= length)
+    if length <= 0 or not inside.any():
+        return AUTO_MAX_WIDTH
+    density = inside.sum() / (length * AUTO_MAX_WIDTH)  # points per m²
+    w = POINTS_PER_BIN / (density * BIN)
+    w = math.ceil(w / WIDTH_STEP - 1e-9) * WIDTH_STEP
+    return round(min(max(w, AUTO_MIN_WIDTH), AUTO_MAX_WIDTH), 2)
+
+
 def corridor_windows(section: Section, width: float) -> tuple[dict[str, tuple[float, float]], float]:
     """Square cloud windows along the string that together cover the corridor, and their half size."""
     n = max(int(math.ceil(section.length / WINDOW_STEP)), 1)
     x, y = section.at(np.linspace(0, section.length, n + 1))
-    half = WINDOW_STEP / 2 + width / 2 + 0.05
+    half = WINDOW_STEP / 2 + read_width(width) / 2 + 0.05
     return {f"{SECTION_PREFIX}{section.code}:{i}": (float(x[i]), float(y[i])) for i in range(n + 1)}, half
 
 
@@ -160,7 +213,7 @@ def corridor_points(section: Section, windows: dict[str, Chunk], width: float,
     xyz = np.unique(np.column_stack([np.concatenate([c.x for c in parts]), np.concatenate([c.y for c in parts]),
                                      np.concatenate([c.z for c in parts])]), axis=0)
     ch, off = section.project(xyz[:, 0], xyz[:, 1])
-    keep = (np.abs(off) <= width / 2) & (ch >= -MAX_SHIFT) & (ch <= section.length + MAX_SHIFT)
+    keep = (np.abs(off) <= read_width(width) / 2) & (ch >= -MAX_SHIFT) & (ch <= section.length + MAX_SHIFT)
     return ch[keep], off[keep], xyz[keep, 2]
 
 
@@ -173,6 +226,8 @@ class Profile:
     z: np.ndarray  # surface line: Z (NaN where there is no data)
     points_ch: np.ndarray = field(default_factory=lambda: np.zeros(0))  # cloud: corridor points
     points_z: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    width: float | None = None  # cloud: corridor width used, m
+    auto: bool = False  # cloud: the width was chosen from the point density
 
     def z_at(self, ch) -> np.ndarray:
         ok = np.isfinite(self.z)
@@ -211,7 +266,12 @@ def dem_profile(section: Section, ds_id: str, path: str) -> Profile:
 
 def cloud_profile(section: Section, ds_id: str, windows: dict[str, Chunk], width: float,
                   classes: set[int] | None) -> Profile:
-    ch, _, z = corridor_points(section, windows, width, classes)
+    ch, off, z = corridor_points(section, windows, width, classes)
+    auto = width <= 0
+    if auto:
+        width = auto_width(ch, off, section.length)
+    keep = np.abs(off) <= width / 2
+    ch, z = ch[keep], z[keep]
     edges = np.arange(-MAX_SHIFT, section.length + MAX_SHIFT + BIN, BIN)
     centres = (edges[:-1] + edges[1:]) / 2
     med = np.full(len(centres), np.nan)
@@ -223,7 +283,7 @@ def cloud_profile(section: Section, ds_id: str, windows: dict[str, Chunk], width
         for b in range(len(centres)):
             if bounds[b + 1] - bounds[b] >= 3:
                 med[b] = np.median(zs[bounds[b]:bounds[b + 1]])
-    return Profile(ds_id, DatasetKind.CLOUD, centres, med, ch, z)
+    return Profile(ds_id, DatasetKind.CLOUD, centres, med, ch, z, width, auto)
 
 
 @dataclass
