@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--open", action="store_true",
                    help="when done, open the GUI on the first finished project's session for review")
 
-    t = sub.add_parser("templates", help="list project templates and where settings.json is")
+    sub.add_parser("templates", help="list project templates and where settings.json is")
 
     c = sub.add_parser("classes", help="list classes in a point cloud")
     c.add_argument("cloud")
@@ -183,14 +183,6 @@ def cmd_crs(a) -> int:
     return 0
 
 
-def _settings_from_defaults(app, tol_z=None, tol_xy=None) -> Settings:
-    d = app.defaults
-    return Settings(cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size, trim=d.trim,
-                    spot_max_outside=d.spot_max_outside, section_codes=d.section_codes,
-                    section_width=d.section_width, document=app.document.copy(),
-                    tol_z=d.tol_z if tol_z is None else tol_z, tol_xy=d.tol_xy if tol_xy is None else tol_xy)
-
-
 def cmd_batch(a) -> int:
     from reality_check import appsettings
     from reality_check.batch import BatchOptions, run_batch
@@ -204,7 +196,7 @@ def cmd_batch(a) -> int:
         return 2
     options = BatchOptions(pdf=a.pdf, html=a.html or not (a.pdf or a.csv), csv=a.csv, out_dir=a.out)
     print(f"Template: {template.name}")
-    items = run_batch(template, a.projects, _settings_from_defaults(app, a.tol_z, a.tol_xy), options)
+    items = run_batch(template, a.projects, app.run_settings(a.tol_z, a.tol_xy), options)
     print()
     for it in items:
         took = f"  [{fmt_seconds(it.seconds)}]" if it.timings.steps else ""
