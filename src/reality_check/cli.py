@@ -24,6 +24,7 @@ from reality_check.export import write_residuals, write_summary
 from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
 from reality_check.report import write_html, write_pdf
+from reality_check.sections import plain_spots, section_lines
 from reality_check.session import SESSION_SUFFIX, Settings, output_name
 from reality_check.stats import summarise, z_offsets
 
@@ -49,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "90%% trimmed mean; 0 = plain mean)")
     r.add_argument("--spot-max-outside", type=float, default=10.0,
                    help="disregard spot heights more than this many metres outside the data (default 10)")
+    r.add_argument("--section-codes", default="CS*",
+                   help="spot height codes that make cross sections, comma-separated wildcards (default CS*)")
+    r.add_argument("--section-width", type=float, default=0.5,
+                   help="cloud corridor width along a cross section, in metres (default 0.5)")
+    r.add_argument("--no-section-join", action="store_true",
+                   help="report: do not join the surveyed points of a cross section with a line")
     r.add_argument("--title", default="", help="project title (default: control file name)")
     r.add_argument("--radius", type=float, default=0.5, help="cloud Z search radius in metres (default 0.5)")
     r.add_argument("--classes", type=_ints, default=None, help="cloud classes to use, e.g. 2,11 (default all)")
@@ -103,7 +110,8 @@ def cmd_run(a) -> int:
     settings = Settings(
         project_title=a.title, cloud_radius=a.radius, cloud_classes=a.classes, control_crs=a.control_crs,
         tol_z=a.tol_z, tol_xy=a.tol_xy, report_chip_size=a.chip_size, trim=a.trim,
-        spot_max_outside=a.spot_max_outside,
+        spot_max_outside=a.spot_max_outside, section_codes=a.section_codes, section_width=a.section_width,
+        section_join=not a.no_section_join,
     )
     if a.document:
         settings.document = DocumentInfo.from_dict(json.loads(Path(a.document).read_text(encoding="utf-8")))
@@ -119,8 +127,8 @@ def cmd_run(a) -> int:
     finally:
         renderer.close()
     if a.csv:
-        write_residuals(s, a.out / output_name(s, "residuals"))
-        write_summary(s, a.out / output_name(s, "summary"))
+        write_residuals(s, a.out / output_name(s, "residuals"), result.windows)
+        write_summary(s, a.out / output_name(s, "summary"), result.windows)
 
     print()
     print(f"{'dataset':38} {'check':5} {'comp':4} {'group':10} {'n':>3} {'mean':>8} {'sd':>8} {'rmse':>8}")
@@ -131,9 +139,11 @@ def cmd_run(a) -> int:
     bad = [o for o in s.observations if o.status.value != "ok"]
     for o in bad:
         print(f"  {o.point_id} in {o.dataset_id}: {o.status.value}")
-    for o in z_offsets(s.spots, s.spot_observations, settings.trim, spots=True):
+    for o in z_offsets(plain_spots(s), s.spot_observations, settings.trim, spots=True):
         print(f"{o.dataset_id:38} spot heights: offset {o.mean:+.3f}{'*' if o.trim else ''} "
               f"median {o.median:+.3f} n {o.n} ({o.above} above, {o.below} below)")
+    for line in section_lines(s, result.windows):
+        print(line)
     print(f"\nResults written to {a.out}")
     return 0
 
@@ -169,7 +179,8 @@ def cmd_crs(a) -> int:
 def _settings_from_defaults(app, tol_z=None, tol_xy=None) -> Settings:
     d = app.defaults
     return Settings(cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size, trim=d.trim,
-                    spot_max_outside=d.spot_max_outside, document=app.document.copy(),
+                    spot_max_outside=d.spot_max_outside, section_codes=d.section_codes,
+                    section_width=d.section_width, document=app.document.copy(),
                     tol_z=d.tol_z if tol_z is None else tol_z, tol_xy=d.tol_xy if tol_xy is None else tol_xy)
 
 
