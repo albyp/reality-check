@@ -41,7 +41,7 @@ class Settings:
     trim: float = 0.10  # average offsets: fraction of dZ values left out, half from each end (Excel TRIMMEAN)
     spot_max_outside: float = 10.0  # m; spot heights further than this from all data are disregarded
     section_codes: str = "CS*"  # spot height codes that make cross sections: comma-separated wildcards
-    section_width: float = 0.5  # m; cloud points within half this of a cross section are drawn and used
+    section_width: float = 0.0  # m; cloud points within half this of a cross section are used (0 = automatic)
     section_join: bool = True  # report: join the surveyed points of a cross section with a line
     document: DocumentInfo = field(default_factory=DocumentInfo)  # report title block, title strip, sign-off
 
