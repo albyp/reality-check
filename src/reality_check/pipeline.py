@@ -15,7 +15,7 @@ from pathlib import Path
 import rasterio
 
 from reality_check.checks import dem_distance_to_data, z_from_dem
-from reality_check.cloud import Chunk, Coverage, cloud_info, sample_windows
+from reality_check.cloud import Chunk, Coverage, cloud_crs, sample_windows
 from reality_check.control import load_control
 from reality_check.crs import CRSLibrary, describe, same_horizontal_crs
 from reality_check.models import Dataset, DatasetKind, Role
@@ -184,11 +184,16 @@ def _apply_control_crs(session: Session, lib: CRSLibrary | None, progress: Progr
     progress(f"Control points transformed from local grid {name!r} to {entry.grid.base_crs}")
 
 
+def dataset_crs(ds: Dataset):
+    """The coordinate system the file records (a pyproj/rasterio CRS), or None."""
+    return cloud_crs(ds.path) if ds.kind is DatasetKind.CLOUD else raster_info(ds.path).crs
+
+
 def check_crs(datasets: list[Dataset], progress: Progress = print) -> list[str]:
     """Report each dataset's CRS and warn when they differ."""
     found = []
     for ds in datasets:
-        crs = cloud_info(ds.path).crs if ds.kind is DatasetKind.CLOUD else raster_info(ds.path).crs
+        crs = dataset_crs(ds)
         found.append((ds, crs))
         progress(f"  {ds.id}: {describe(crs)}")
     msgs = []
