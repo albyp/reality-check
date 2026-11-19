@@ -44,6 +44,39 @@ out of the table and averages, and listed under the table with its distance
 to the nearest data. One just off the edge stays in the table as "Outside
 dataset".
 
+A file can carry a code per point: a `Code` (or `Description`, `Feature`)
+column, or, in a file without a header, a fifth column of text. A fifth column
+of only 0 and 1 is read as the GCP / checkpoint flag instead (as in a
+Metashape marker export).
+
+### Cross sections
+
+Spot heights coded `CS1`, `CS2` … are cross sections: each code is one
+section, its points joined in the order they are in the file (the order they
+were surveyed). They are taken out of the spot heights table and get a
+section of their own in the report:
+
+- A profile chart: chainage along the string, height up, with the vertical
+  exaggeration stated. Point cloud points within the corridor (0.5 m wide)
+  are grey dots, the cloud's median a dashed line, a DEM a solid line, and the
+  surveyed points diamonds, joined by a line or not (*Join cross-section
+  points* on the Report tab).
+- dZ at each surveyed point. For a point cloud this is the median of the
+  corridor points within 0.05 m of the point's chainage, so a kerb top is
+  compared with the kerb, not the road beside it.
+- A best fit per surface: how far along the section, and how far up or down,
+  the surface has to move for its shape to match the surveyed string. That is
+  a horizontal check without a target. It needs ground with shape (kerbs,
+  drains, windrows, bund crests): a section that is close to a straight line,
+  or a best fit that barely improves the match, gives no shift. Two sections
+  at right angles give both horizontal directions.
+
+The sections are drawn on the site overview, and exported in the CSVs (role
+`section`, with a `code` column; a `section CS1` row per surface in the
+summary). The codes (`section_codes`, default `CS*`, comma-separated
+wildcards such as `CS*, XS*`) and the corridor width (`section_width`) are on
+the Settings tab and in `settings.json`.
+
 All datasets in one run are assumed to share the control points' coordinate
 system. RealityCheck warns if the files say otherwise.
 
@@ -111,6 +144,8 @@ or on the Settings tab. Its `defaults`:
 | `report_chip_size` | `2.0` | Report snapshot width in metres |
 | `trim` | `0.1` | Average offsets: fraction of dZ values left out, half from each end. `0.1` = 90% trimmed mean (Excel `TRIMMEAN(…, 0.1)`); `0` = plain mean |
 | `spot_max_outside` | `10.0` | Spot heights further than this (metres) from all DEM and cloud data are disregarded and listed |
+| `section_codes` | `"CS*"` | Spot height codes that make cross sections: comma-separated wildcards |
+| `section_width` | `0.5` | Cross sections: width in metres of the point cloud corridor along each section |
 
 ### Report document details
 
@@ -174,7 +209,9 @@ reality-check crs list
 
 `run` writes `<title>_RealityCheck.html` and `<title>_RealityCheck.rcheck.json`
 (open it in the GUI to review). The title defaults to the control file name.
-Options: `--title`, `--pdf`, `--csv`, `--spots FILE` (spot heights),
+Options: `--title`, `--pdf`, `--csv`, `--spots FILE` (spot heights, and
+cross sections from their codes: `--section-codes "CS*"`, `--section-width 0.5`,
+`--no-section-join`),
 `--trim` (default 0.1), `--spot-max-outside` (default 10 m), `--radius` (cloud Z search radius,
 default 0.5 m), `--classes 2,11`, `--tol-z`, `--tol-xy`, `--chip-size`,
 `--control-crs NAME` (control points in a local grid from the CRS library),
