@@ -26,11 +26,11 @@ from reality_check.cloud import CLASS_NAMES, Chunk, is_classified
 from reality_check.detect import detect
 from reality_check.document import SIGN_ROLES, DocumentInfo, Signatory
 from reality_check.export import write_residuals, write_summary
-from reality_check.models import CheckKind, DatasetKind, ObsSource, ObsStatus, Role
+from reality_check.models import KIND_LABEL, CheckKind, DatasetKind, ObsSource, ObsStatus, Role
 from reality_check.pipeline import check_crs, load_windows, make_datasets
 from reality_check.pipeline import run as run_pipeline
 from reality_check.render import ChipRenderer
-from reality_check.report import KIND_LABEL, build_html, write_pdf
+from reality_check.report import build_html, write_pdf
 from reality_check.review import (
     disable_outside_data,
     find_obs,
@@ -114,17 +114,10 @@ def app_settings() -> appsettings.AppSettings:
     if S.app is None:
         S.app = appsettings.load()
         if S.session is None:
-            S.settings = _default_settings()
+            S.settings = S.app.run_settings()
         S.template_name = S.template_name or S.app.default_template
         S.batch_template = S.batch_template or S.app.default_template
     return S.app
-
-
-def _default_settings() -> Settings:
-    d = app_settings().defaults
-    return Settings(tol_z=d.tol_z, tol_xy=d.tol_xy, cloud_radius=d.cloud_radius, report_chip_size=d.report_chip_size,
-                    trim=d.trim, spot_max_outside=d.spot_max_outside, section_codes=d.section_codes,
-                    section_width=d.section_width, document=app_settings().document.copy())
 
 
 def _template_names() -> list[str]:
@@ -173,30 +166,10 @@ window.addEventListener('beforeunload', e => {
 # In the desktop window, use pywebview's dialogs: they belong to the app window,
 # so they always open on top of it. In browser mode, use the Windows dialogs
 # directly (windialogs), owned by the browser window so they open on top of it.
-# tkinter is the last resort (non-Windows development only): from a background
-# process its dialog can open behind the browser.
-
-def _tk_dialog(kind: str, title: str, types, initial: str = "", directory: str = "") -> str:
-    import tkinter as tk
-    from tkinter import filedialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        if kind == "folder":
-            return filedialog.askdirectory(parent=root, title=title, initialdir=directory or None)
-        if kind == "open":
-            return filedialog.askopenfilename(parent=root, title=title, filetypes=types, initialdir=directory or None)
-        return filedialog.asksaveasfilename(parent=root, title=title, filetypes=types, initialfile=initial,
-                                            initialdir=directory or None,
-                                            defaultextension=types[0][1].split()[0].lstrip("*"))
-    finally:
-        root.destroy()
-
+# File types are given as [("PDF", "*.pdf")] throughout.
 
 def _webview_types(types) -> tuple[str, ...]:
-    """tkinter-style [("PDF", "*.pdf")] to pywebview-style ("PDF (*.pdf)",)."""
+    """[("PDF", "*.pdf")] to pywebview-style ("PDF (*.pdf)",)."""
     return tuple(f"{label} ({';'.join(pattern.split())})" for label, pattern in types)
 
 
@@ -229,9 +202,9 @@ async def _dialog(kind: str, title: str, types, initial: str = "", directory: st
     try:
         if S.window is not None:
             return await run.io_bound(_webview_dialog, kind, types, initial, directory)
-        if windialogs.available():
-            return await run.io_bound(_win_dialog, kind, title, types, initial, directory)
-        return await run.io_bound(_tk_dialog, kind, title, types, initial, directory)
+        if not windialogs.available():
+            raise RuntimeError("no Windows file dialog on this system")
+        return await run.io_bound(_win_dialog, kind, title, types, initial, directory)
     except Exception as e:  # noqa: BLE001 - a dialog failure must never be silent
         log.exception("File dialog failed")
         ui.notify(f"Could not open the file dialog: {type(e).__name__}: {e}. You can paste a path into the box "
@@ -287,7 +260,7 @@ def clear_all() -> None:
         S.renderer.close()
     S.renderer = None
     S.inputs = {role: "" for role in ROLES}
-    S.settings = _default_settings()
+    S.settings = app_settings().run_settings()
     S.session = S.session_path = S.selected = None
     S.windows, S.warnings, S.timings = {}, [], Timings()
     S.project_dir, S.dirty = "", False
@@ -906,7 +879,7 @@ def classes_box() -> None:
             ui.label("Only ticked classes are used for Z checks and chips.").classes("text-caption text-grey-7")
             active = set(S.settings.cloud_classes) if S.settings.cloud_classes is not None else set(counts)
 
-            def toggle(cls: int, on: bool) -> None:
+            def toggle(cls: int, on: bool, counts=counts) -> None:  # this cloud's classes, not the loop's last
                 current = set(S.settings.cloud_classes) if S.settings.cloud_classes is not None else set(counts)
                 current = current | {cls} if on else current - {cls}
                 S.settings.cloud_classes = None if current >= set(counts) else sorted(current)
