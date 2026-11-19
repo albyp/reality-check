@@ -23,6 +23,7 @@ from reality_check.raster import raster_info
 from reality_check.review import SPOT_PREFIX, recompute_cloud_z
 from reality_check.sections import corridor_windows, find_sections
 from reality_check.session import Session, Settings
+from reality_check.timings import Timings
 
 Progress = Callable[[str], None]
 
@@ -35,6 +36,7 @@ class RunResult:
     session: Session
     windows: dict[str, dict[str, Chunk]] = field(default_factory=dict)  # cloud dataset id -> point id -> points
     warnings: list[str] = field(default_factory=list)
+    timings: Timings = field(default_factory=Timings)
 
 
 def make_datasets(ortho: list[str], dem: list[str], cloud: list[str]) -> list[Dataset]:
@@ -60,33 +62,42 @@ def run(
     spots_path: str | None = None,
 ) -> RunResult:
     settings = settings or Settings()
-    points = load_control(control_path)
+    t = Timings()
+    with t.step("Read", "Control points", Path(control_path).name):
+        points = load_control(control_path)
+    t.note(f"{len(points)} points")
     progress(f"Loaded {len(points)} control points from {control_path}")
     session = Session(control_path, points, datasets, settings)
     if spots_path:
         session.spots_path = str(spots_path)
-        session.spots = load_control(spots_path)
+        with t.step("Read", "Spot heights", Path(spots_path).name):
+            session.spots = load_control(spots_path)
         for p in session.spots:
             p.role = Role.UNKNOWN  # a GCP / checkpoint column means nothing for spot heights
+        t.note(f"{len(session.spots)} points")
         progress(f"Loaded {len(session.spots)} spot heights from {spots_path}")
         for sec in find_sections(session.spots, settings.section_codes):
             progress(f"  Cross section {sec.code}: {len(sec.nodes)} points, {sec.length:.1f} m")
     _apply_control_crs(session, crs_library, progress)
-    result = RunResult(session)
-    result.warnings = check_crs(datasets, progress)
+    result = RunResult(session, timings=t)
+    with t.step("Read", "Dataset headers and coordinate systems", f"{len(datasets)} files"):
+        result.warnings = check_crs(datasets, progress)
 
     for ds in datasets:
         if ds.kind is DatasetKind.DEM:
             progress(f"DEM Z check: {Path(ds.path).name}")
-            session.observations += z_from_dem(ds.id, ds.path, points)
-            if session.spots:
-                session.spot_observations += z_from_dem(ds.id, ds.path, session.spots)
+            with t.step("Compute", "DEM Z check", Path(ds.path).name):
+                session.observations += z_from_dem(ds.id, ds.path, points)
+                if session.spots:
+                    session.spot_observations += z_from_dem(ds.id, ds.path, session.spots)
 
     coverages: dict[str, Coverage] = {}
-    result.windows = load_windows(session, progress, coverages if session.spots else None)
-    recompute_cloud_z(session, result.windows)
+    result.windows = load_windows(session, progress, coverages if session.spots else None, t)
+    with t.step("Compute", "Point cloud Z"):
+        recompute_cloud_z(session, result.windows)
     if session.spots:
-        disregard_far_spots(session, coverages, progress)
+        with t.step("Compute", "Spot heights outside the data"):
+            disregard_far_spots(session, coverages, progress)
     return result
 
 
@@ -123,8 +134,8 @@ def disregard_far_spots(session: Session, coverages: dict[str, Coverage], progre
                  f"data: {listed}")
 
 
-def load_windows(session: Session, progress: Progress = print,
-                 coverages: dict[str, Coverage] | None = None) -> dict[str, dict[str, Chunk]]:
+def load_windows(session: Session, progress: Progress = print, coverages: dict[str, Coverage] | None = None,
+                 timings: Timings | None = None) -> dict[str, dict[str, Chunk]]:
     """Stream each point cloud once and keep the points around every control point
     and spot height (spot heights under SPOT_PREFIX + id), and along every cross
     section (SECTION_PREFIX). If coverages is given, also fill it with where each
@@ -145,7 +156,10 @@ def load_windows(session: Session, progress: Progress = print,
         if ds.kind is not DatasetKind.CLOUD:
             continue
         progress(f"Reading point cloud: {Path(ds.path).name}")
-        sample = sample_windows(ds.path, centres, halves, coverage=coverages is not None)
+        t = timings or Timings()
+        with t.step("Read", "Point cloud", Path(ds.path).name):
+            sample = sample_windows(ds.path, centres, halves, coverage=coverages is not None)
+        t.note(f"{sample.total_points / 1e6:.1f} M points, {len(centres)} windows")
         if coverages is not None:
             coverages[ds.id] = sample.coverage
         session.cloud_class_counts[ds.id] = sample.class_counts
