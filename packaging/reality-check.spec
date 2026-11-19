@@ -45,7 +45,8 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    excludes=["matplotlib", "IPython", "pytest"],
+    # tkinter (and its Tcl/Tk runtime) is not used: the file dialogs are Windows' own (windialogs.py).
+    excludes=["matplotlib", "IPython", "pytest", "tkinter", "_tkinter"],
 )
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="RealityCheck", console=False)
