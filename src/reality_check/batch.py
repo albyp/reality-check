@@ -20,6 +20,7 @@ from reality_check.pipeline import make_datasets, run
 from reality_check.render import ChipRenderer
 from reality_check.report import write_html, write_pdf
 from reality_check.review import point_results
+from reality_check.sections import plain_spots, section_lines
 from reality_check.session import Settings, output_name
 from reality_check.stats import summarise, z_offsets
 from reality_check.templates import Resolution, Template, resolve
@@ -83,10 +84,10 @@ def run_one(item: BatchResult, settings: Settings, options: BatchOptions, progre
     if options.csv:
         for kind, writer in (("residuals", write_residuals), ("summary", write_summary)):
             path = out / output_name(s, kind)
-            writer(s, path)
+            writer(s, path, result.windows)
             item.outputs.append(str(path))
 
-    item.headline = _headline(s)
+    item.headline = _headline(s, result.windows)
     item.exceed_count = sum(1 for pr in point_results(s) if pr.point.enabled and pr.exceeds)
     item.status = "done"
     missing = [r for r in ("ortho", "dem", "cloud") if r not in f]
@@ -94,7 +95,7 @@ def run_one(item: BatchResult, settings: Settings, options: BatchOptions, progre
     return item
 
 
-def _headline(session) -> list[str]:
+def _headline(session, windows=None) -> list[str]:
     kind = {d.id: d.kind for d in session.datasets}
     label = {DatasetKind.ORTHO: "Ortho", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "Cloud"}
     rows = summarise(session.points, session.observations)
@@ -108,9 +109,11 @@ def _headline(session) -> list[str]:
             verdict = "" if tol is None else (" PASS" if r.stats.rmse <= tol else " FAIL")
             group = "checkpoints" if r.group == "checkpoint" else "all points"
             out.append(f"{label[kind[ds.id]]} {name} RMSE {r.stats.rmse * 1000:.0f} mm ({group}){verdict}")
-    for o in z_offsets(session.spots, session.spot_observations, session.settings.trim, spots=True):
+    for o in z_offsets(plain_spots(session), session.spot_observations, session.settings.trim, spots=True):
         star = "*" if o.trim > 0 else ""
         out.append(f"{label[kind[o.dataset_id]]} vs {o.n} spot heights {o.mean * 1000:+.0f} mm{star}")
+    if windows is not None:
+        out += section_lines(session, windows, lambda d: label[d.kind])
     return out
 
 
