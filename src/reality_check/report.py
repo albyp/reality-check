@@ -25,9 +25,11 @@ from reality_check.render import ChipRenderer, to_data_url
 from reality_check.review import point_results
 from reality_check.overview import PX_PER_MM, render_overview
 from reality_check.sectionplot import section_svg
-from reality_check.sections import BIN, SectionResult, analyse, plain_spots
+from reality_check.sections import BIN, SectionResult, analyse, plain_spots, section_ids
 from reality_check.session import Session, project_title
 from reality_check.stats import LEVEL, Stats, summarise, trim_note, z_offsets
+from reality_check.timings import Timings
+from reality_check.timings import fmt as fmt_seconds
 
 log = logging.getLogger("reality_check")
 KIND_LABEL = {DatasetKind.ORTHO: "Orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "Point cloud"}
@@ -154,6 +156,12 @@ figure.overview figcaption { font-size:7pt; color:var(--mid); padding:1mm 2.2mm 
 .xs .legend { font-size:6.5pt; color:var(--mid); padding:.6mm 2mm 1.4mm; border-bottom:var(--w2) solid var(--ink); }
 .xs table { margin-top:2mm; }
 .nojoin .cs-join { display:none; }
+
+/* Processing times: a dropdown at the end, on screen only. */
+details.timings { margin-top:5mm; border:var(--w3) solid var(--ink); padding:1.2mm 2mm; }
+details.timings summary { cursor:pointer; font:600 7.5pt var(--sans); letter-spacing:.06em; }
+details.timings summary .muted { font-weight:400; letter-spacing:0; }
+details.timings table { margin-top:1.5mm; }
 .note { font-size:7pt; color:var(--mid); margin:1.4mm 0 0; }
 
 /* Sign-off: a ruled schedule, so names, signatures and dates line up whatever is filled in. */
@@ -329,17 +337,29 @@ def _tol_class(v: float | None, tol: float | None, absolute: bool = True) -> str
     return "bad" if (abs(v) if absolute else v) > tol else ""
 
 
-def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | None = None, title: str = "") -> str:
+def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | None = None, title: str = "",
+               timings: Timings | None = None) -> str:
+    """The report. timings: the run's processing times; the report adds its own steps (replacing those of an
+    earlier build) and lists them all in a Processing times section at the end (on screen, not in print)."""
+    t = timings if timings is not None else Timings()
+    t.start_phase("report")
     s = session.settings
     ds_by_id = {d.id: d for d in session.datasets}
-    results = point_results(session)
-    summary = summarise(session.points, session.observations)
+    with t.step("Compute", "Results and statistics"):
+        results = point_results(session)
+        summary = summarise(session.points, session.observations)
     z_ds = [d for d in session.datasets if d.kind in (DatasetKind.DEM, DatasetKind.CLOUD)]
     xy_ds = [d for d in session.datasets if any(o.dataset_id == d.id and o.check is CheckKind.XY
                                                   for o in session.observations)]
     title = title or project_title(session)
-    sections = analyse(session, renderer.windows) if session.spots else []
+    sections = []
+    if session.spots and section_ids(session):
+        with t.step("Compute", "Cross sections", "profiles and best fit"):
+            sections = analyse(session, renderer.windows)
+        t.note(f"{len(sections)} section{'s' if len(sections) != 1 else ''}")
     spots = plain_spots(session)
+    draw_start = time.perf_counter()  # summary, inputs and tables; the map, charts and snapshots are timed apart
+    drawn_apart = 0.0
     generated = f"{datetime.now():%d %b %Y %H:%M}"
     control = Path(session.control_path).name
     tol = []
@@ -376,8 +396,9 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
         if sections:
             names = ", ".join(f"{_e(r.section.code)} ({len(r.section.nodes)} points, {r.section.length:.1f} m)"
                               for r in sections)
-            inputs.append(("Cross sections", f"{names}; codes {_e(s.section_codes)}; cloud corridor "
-                                             f"{s.section_width:g} m wide"))
+            corridor = (f"{s.section_width:g} m wide" if s.section_width > 0
+                        else "width set from the point density")
+            inputs.append(("Cross sections", f"{names}; codes {_e(s.section_codes)}; cloud corridor {corridor}"))
     for d in session.datasets:
         inputs.append((KIND_LABEL[d.kind], f"{_e(Path(d.path).name)} <span class='muted'>· {_e(_crs_text(d))}</span>"))
     classes = s.cloud_classes
@@ -437,20 +458,32 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
             w(f"<p class='note'>{_e(note)}</p>")
     w("</section>")
 
+    map_start = time.perf_counter()
     overview = render_overview(session)
+    overview_urls = [to_data_url(sheet, "JPEG") for sheet in overview.sheets]
+    map_s = time.perf_counter() - map_start
+    drawn_apart += map_s
+    if overview.background_seconds:
+        t.add("Read", "Site overview background", overview.background_seconds, overview.source)
+    t.add("Draw", "Site overview map", map_s - overview.background_seconds,
+          f"{len(overview.sheets)} sheet{'s' if len(overview.sheets) != 1 else ''}")
     caption = ("Ellipses show horizontal error (semi-axes dX and dY, exaggerated by the stated factor); "
                "the line points in the error direction. Colour shows dZ.")
     if overview.layout.strips > 1:
         caption += (" The site is long and narrow, so it is cut into numbered strips at one scale, "
                     "in the order stated under the map.")
     overview_heading = h2("Site overview", "dZ COLOURS: DARK = SURFACE LOW, LIGHT = HIGH")
+    if sections:
+        caption += (" Cross sections are drawn as section marks: the triangles point the way the section is viewed "
+                    "in its chart (first point on the left). A section shorter than 22 mm on the map gets a mark "
+                    "22 mm long, centred on it.")
     if overview.left_out:
         caption += (f" Not on the map, as no dataset has data there: {_e(', '.join(overview.left_out))}.")
     for i, sheet in enumerate(overview.sheets):
         heading = _continued(overview_heading) if i else overview_heading
         # Printed at the size it was drawn, so text keeps its size on paper.
         w(f"<section class='block{' page-break' if i else ''}'>{heading}<figure class='overview'>"
-          f"<img style='--w:{sheet.width / PX_PER_MM:.1f}mm' src='{to_data_url(sheet, 'JPEG')}' "
+          f"<img style='--w:{sheet.width / PX_PER_MM:.1f}mm' src='{overview_urls[i]}' "
           f"alt='Site overview with control points'>"
           f"{f'<figcaption>{caption}</figcaption>' if i == len(overview.sheets) - 1 else ''}</figure></section>")
 
@@ -505,14 +538,21 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
                        *_spot_table(session, spots, z_ds, spot_offsets),
                        rows_per_page=COMPACT_ROWS_PER_PAGE, css_class="compact"))
     if z_ds and sections:
+        charts_start = time.perf_counter()
         w(_sections_block(session, sections, ds_by_id,
                           h2("Cross sections", "dZ = SURFACE − SURVEYED POINT · mm", "page-break")))
+        charts_s = time.perf_counter() - charts_start
+        drawn_apart += charts_s
+        t.add("Draw", "Cross-section charts and tables", charts_s,
+              f"{len(sections)} section{'s' if len(sections) != 1 else ''}")
 
     if doc.named_signatories():
         w(f"<section class='block'>{h2('Sign-off')}{_signoff(doc)}</section>")
+    t.add("Draw", "Summary, inputs and tables", time.perf_counter() - draw_start - drawn_apart)
 
     # Point pages
     size = s.report_chip_size
+    chip_s: dict[str, float] = {}
     w(h2("Point details", f"CHIPS {size:g} m WIDE", "page-break"))
     for pr in results:
         cp = pr.point
@@ -534,17 +574,40 @@ def build_html(session: Session, renderer: ChipRenderer, warnings: list[str] | N
             w(f"<tr><td>{kind}</td><td>{check.value.upper()}</td>{cells}<td>{STATUS_LABEL[o.status]}{src}{extra}</td></tr>")
         w("</tbody></table><div class='chips'>")
         for d in session.datasets:
+            chip_start = time.perf_counter()
             img = renderer.chip(cp.id, d.id, size, px=360)
-            w(f"<figure><img src='{to_data_url(img, 'JPEG')}' alt='{_e(cp.id)} {KIND_LABEL[d.kind]}'>"
+            url = to_data_url(img, "JPEG")
+            chip_s[d.id] = chip_s.get(d.id, 0.0) + time.perf_counter() - chip_start
+            w(f"<figure><img src='{url}' alt='{_e(cp.id)} {KIND_LABEL[d.kind]}'>"
               f"<figcaption>{KIND_LABEL[d.kind]} · {size:g} m · red = surveyed, cyan = measured</figcaption></figure>")
         w("</div>")
         if cp.note:
             w(f"<p class='note'>{_e(cp.note)}</p>")
         w("</div></section>")
+    for d in session.datasets:
+        if d.id in chip_s:
+            t.add("Draw", f"Point snapshots: {KIND_LABEL[d.kind].lower()}", chip_s[d.id], f"{len(results)} snapshots")
 
+    w(_timings_block(t))
     w(f"<p class='gen'>Generated by RealityCheck {__version__} (Plumb) · QA/QC for photogrammetry and LiDAR</p>"
       "</main></body></html>")
     return "".join(out)
+
+
+def _timings_block(t: Timings) -> str:
+    """Processing times as a dropdown, on screen only: how long each step of the run and this report took."""
+    if not t.steps:
+        return ""
+    rows = "".join(f"<tr><td>{_e(st.group)}</td><td>{_e(st.name)}</td><td class='muted'>{_e(st.detail)}</td>"
+                   f"<td class='n'>{fmt_seconds(st.seconds)}</td></tr>" for st in t.steps)
+    groups = " · ".join(f"{g} {fmt_seconds(v)}" for g, v in t.by_group().items())
+    note = ("The report's own steps run to the end of the point details. Exports (PDF, CSV) come after the report is "
+            "built, so they are not in this list; RealityCheck's log has them.")
+    return (f"<details class='screen-only timings'><summary>Processing times · total {fmt_seconds(t.total)}"
+            f" <span class='muted'>({groups})</span></summary><div class='compact'><table><thead><tr><th>STEP</th>"
+            f"<th>WHAT</th><th>DETAIL</th><th class='n'>TIME</th></tr></thead><tbody>{rows}<tr class='foot'>"
+            f"<td colspan=3><b>Total</b></td><td class='n'><b>{fmt_seconds(t.total)}</b></td></tr></tbody></table>"
+            f"</div><p class='note'>{note}</p></details>")
 
 
 def _z_table(session: Session, results, z_ds, offsets) -> tuple[str, list[str], str]:
@@ -639,15 +702,18 @@ def _sections_block(session: Session, sections: list[SectionResult], ds_by_id, h
         sec = r.section
         svg, ve = section_svg(r)
         last = sec.nodes[-1].id
+        order = " · sorted along the section (the file order zig-zags)" if sec.reordered else ""
         out.append(f"<section class='xs'><header><h3>{_e(sec.code)}</h3>"
                    f"<span class='sm'>{len(sec.nodes)} surveyed points · {sec.length:.2f} m · "
-                   f"{_e(sec.nodes[0].id)} to {_e(last)}, bearing {sec.bearing():.0f}°</span></header>{svg}")
-        legend = ["◇ surveyed points<span class='cs-join'>, joined in survey order</span>"]
-        kinds = {p.kind for p in r.profiles}
-        if DatasetKind.DEM in kinds:
+                   f"{_e(sec.nodes[0].id)} to {_e(last)}, bearing {sec.bearing():.0f}°{order}</span></header>{svg}")
+        joined = "sorted along the section" if sec.reordered else "survey order"
+        legend = [f"◇ surveyed points<span class='cs-join'>, joined in {joined}</span>"]
+        if any(p.kind is DatasetKind.DEM for p in r.profiles):
             legend.append("— DEM")
-        if DatasetKind.CLOUD in kinds:
-            legend.append(f"· point cloud within {s.section_width / 2:g} m of the section, - - its median")
+        for p in r.profiles:
+            if p.kind is DatasetKind.CLOUD and p.width:
+                how = " (set from the point density)" if p.auto else ""
+                legend.append(f"· point cloud within {p.width / 2:g} m of the section{how}, - - its median")
         out.append(f"<div class='legend'>{' · '.join(legend)} · vertical exaggeration ×{ve:.0f}</div><div class='body'>")
 
         # The fit per surface.
@@ -695,7 +761,7 @@ def _sections_block(session: Session, sections: list[SectionResult], ds_by_id, h
                    "</tbody></table></div></div></section>")
     out.append(
         "<p class='note'>A cross section is a string of spot heights with one code, joined in the order they were "
-        f"surveyed (codes {_e(s.section_codes)}). dZ in mm = surface minus surveyed point; for a point cloud it is the "
+        f"surveyed, or sorted along the section if that order zig-zags (codes {_e(s.section_codes)}). dZ in mm = surface minus surveyed point; for a point cloud it is the "
         f"median of the corridor points within {BIN / 2:g} m of the point's chainage. ALONG is how far along the "
         "section the surface has to move for its shape to match the surveyed string best (positive = towards the "
         "last point), and VERTICAL the offset left after that move: a horizontal check without a target. It needs "
@@ -778,9 +844,10 @@ def _issues(session: Session, results, ds_by_id) -> list[str]:
     return out
 
 
-def write_html(session: Session, renderer: ChipRenderer, path: Path, warnings: list[str] | None = None) -> Path:
+def write_html(session: Session, renderer: ChipRenderer, path: Path, warnings: list[str] | None = None,
+               timings: Timings | None = None) -> Path:
     path = Path(path)
-    path.write_text(build_html(session, renderer, warnings), encoding="utf-8")
+    path.write_text(build_html(session, renderer, warnings, timings=timings), encoding="utf-8")
     return path
 
 
@@ -795,8 +862,11 @@ def find_browser() -> str | None:
     return found or shutil.which("msedge") or shutil.which("chrome")
 
 
-def write_pdf(session: Session, renderer: ChipRenderer, path: Path, warnings: list[str] | None = None) -> Path:
-    """Render the HTML report to PDF with headless Edge (or Chrome)."""
+def write_pdf(session: Session, renderer: ChipRenderer, path: Path, warnings: list[str] | None = None,
+              timings: Timings | None = None, html: str | None = None) -> Path:
+    """Render the HTML report to PDF with headless Edge (or Chrome). html: the report already built (so an HTML
+    and a PDF export build it once); otherwise it is built here. The print step is added to timings (phase
+    "export"), after the report's own steps."""
     browser = find_browser()
     if browser is None:
         raise RuntimeError("PDF export needs Microsoft Edge or Google Chrome. Export HTML and print it instead.")
@@ -806,11 +876,18 @@ def write_pdf(session: Session, renderer: ChipRenderer, path: Path, warnings: li
     # after printing; a failed clean-up must not turn a written PDF into an error.
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         src = Path(tmp) / "report.html"
-        write_html(session, renderer, src, warnings)
+        t = timings if timings is not None else Timings()
+        if html is None:
+            write_html(session, renderer, src, warnings, t)
+        else:
+            src.write_text(html, encoding="utf-8")
         profile = Path(tmp) / "profile"  # isolated profile so a running Edge window is not reused
         printed = Path(tmp) / "report.pdf"
-        _print_to_pdf(browser, src, printed, profile)
-        shutil.move(printed, path)
+        if t.phase != "export":
+            t.start_phase("export")
+        with t.step("Write", "PDF (print with Edge)", path.name):
+            _print_to_pdf(browser, src, printed, profile)
+            shutil.move(printed, path)
     return path
 
 
