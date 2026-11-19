@@ -372,12 +372,13 @@ Done items are listed in [CHANGELOG.md](CHANGELOG.md).
 - [ ] Hide/mark GCPs vs checkpoints in the summary cards once roles are set.
 - [ ] GUI: add more than one dataset of each kind.
 - [ ] GUI: CRS library screen (add, edit, import, export, local grids).
-- [ ] Installer (for example Inno Setup) and a GitHub release.
+- [ ] Installer (for example Inno Setup) and code signing.
 
 ### Later
 - [ ] ML target detector trained on confirmed picks; support other target types.
-- [ ] Audit strings: surveyed lines (for example road cross-sections) compared
-      against DEM / cloud profiles along the same path.
+- [ ] Cross sections: long strings (for example road centrelines) split into
+      chart panels, and a combined XY shift from pairs of sections at right
+      angles.
 - [ ] Check grids: flat-ground point grids (for example 5 x 5) for lidar Z
       checks that do not depend on RGB alignment. Can load as spot heights
       today; a grid summary per pad would come later.
