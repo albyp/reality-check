@@ -3,7 +3,7 @@
 All notable changes to RealityCheck. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.4.0] - in development
+## [0.4.0] - 2026-11-19
 
 **Much faster on large datasets.** On a real site (a 93.6 million point
 cloud, a 1 GB orthomosaic and 478 spot heights) a full run with HTML, PDF and
