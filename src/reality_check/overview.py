@@ -19,7 +19,7 @@ from rasterio.enums import Resampling
 from rasterio.windows import from_bounds
 
 from reality_check.chips import _font, _nice_length, hillshade
-from reality_check.models import CheckKind, DatasetKind, ObsStatus
+from reality_check.models import KIND_NOUN, CheckKind, DatasetKind, ObsStatus
 from reality_check.review import point_results
 from reality_check.sections import find_sections
 from reality_check.session import Session
@@ -53,17 +53,6 @@ def dz_colour(dz: float, limit: float) -> tuple[int, int, int]:
     i = min(int(x), len(DZ_RAMP) - 2)
     c = DZ_RAMP[i] + (DZ_RAMP[i + 1] - DZ_RAMP[i]) * (x - i)
     return tuple(int(v) for v in c)
-
-
-def _nice_down(x: float) -> float:
-    """Largest 1/2/5 x 10^n not above x."""
-    if x <= 0:
-        return 1.0
-    exp = math.floor(math.log10(x))
-    for m in (5, 2, 1):
-        if m * 10**exp <= x:
-            return m * 10**exp
-    return 10**exp
 
 
 def _read_into(r, bands: list[int], bounds, width: int, height: int,
@@ -252,7 +241,7 @@ def render_overview(session: Session) -> Overview:
     mpp = 1 / (layout.scale * PX_PER_MM)  # ground metres per pixel
     factor = None
     if dxys and max(dxys) > 0:
-        factor = _nice_down(TARGET_ELLIPSE_MM / layout.scale / max(dxys))
+        factor = _nice_length(TARGET_ELLIPSE_MM / layout.scale / max(dxys))
 
     strings = [(sec.code, [(p.x, p.y) for p in sec.nodes])
                for sec in find_sections(session.spots, session.settings.section_codes)]
@@ -427,7 +416,7 @@ def _legend(img, map_h, mpp, factor, dz_limit, source, xy_ds, z_ds, has_xy, font
 
     # Ellipse exaggeration
     if has_xy and factor:
-        err_m = _nice_down((box_w - 2 * pad) * 0.4 * mpp / factor)
+        err_m = _nice_length((box_w - 2 * pad) * 0.4 * mpp / factor)
         err_px = err_m * factor / mpp
         draw.line([(x, y + 7), (x + err_px, y + 7)], fill=ink, width=3)
         draw.text((x + err_px + 8, y), f"= {err_m * 1000:g} mm XY error (ellipses x{factor:g})", fill=ink, font=font)
@@ -449,12 +438,12 @@ def _legend(img, map_h, mpp, factor, dz_limit, source, xy_ds, z_ds, has_xy, font
 
     src = [f"Background: {source}"]
     if z_ds:
-        src.append(f"dZ: {_kind(z_ds)}")
+        src.append(f"dZ: {KIND_NOUN[z_ds.kind]}")
     if xy_ds and has_xy:
-        src.append(f"XY: {_kind(xy_ds)}")
-    draw.text((x, y), " · ".join(src), fill=(70, 70, 70, 255), font=font)
+        src.append(f"XY: {KIND_NOUN[xy_ds.kind]}")
+    draw.text((x, y), " Â· ".join(src), fill=(70, 70, 70, 255), font=font)
     y += line_h
-    draw.text((x, y), "Hollow = disabled or no dZ · red X = target not found", fill=(70, 70, 70, 255), font=font)
+    draw.text((x, y), "Hollow = disabled or no dZ Â· red X = target not found", fill=(70, 70, 70, 255), font=font)
     if layout is not None:
         y += line_h
         order = "north to south, left to right" if layout.tall else "west to east, top to bottom"
@@ -493,7 +482,3 @@ def _key_map(draw, layout: Layout, shown, xs, ys, right: float, top: float, heig
         draw.ellipse([px - 2, py - 2, px + 2, py + 2], fill=(20, 20, 20, 255))
     tw = draw.textlength("Key", font=font)
     draw.text((x0 - tw - 8, top), "Key", fill=(70, 70, 70, 255), font=font)
-
-
-def _kind(ds) -> str:
-    return {DatasetKind.ORTHO: "orthomosaic", DatasetKind.DEM: "DEM", DatasetKind.CLOUD: "point cloud"}[ds.kind]
